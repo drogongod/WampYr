@@ -1,0 +1,7 @@
+data/
+__pycache__/
+_archive_539fact_run_20261011/
+*.log
+*.npz
+mamba3_quinary_brick.py
+_test_mamba3_quinary_brick.py
