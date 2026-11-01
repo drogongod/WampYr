@@ -128,11 +128,13 @@ exact forward-pass counter:
 2. **Galloping/doubling search** (grow batch size only after a success, snap back toward 1 on any
    failure): bounded. Plateaus at a fixed 0.7-0.8x overhead instead of spiraling, with quality
    matching or slightly beating ground truth throughout (both reach the exact correct sentence by
-   rep 10). Not a net win on a 30-rep same-fact stress test (31% more total passes over the whole
-   run, because most of that benchmark's workload sits in the fully-converged tail where the
-   plateau dominates) -- but a large, real win specifically in reps 1-4 (65.9x, 3.2x, 2.2x, 1.2x),
-   which is the regime a real multi-fact curriculum mostly lives in (most facts seen only a
-   handful of times, not drilled dozens of times running). Full numbers:
+   rep 10, and gallop's NLL is actually lower than ground's at several reps, e.g. rep 10: 0.0235 vs
+   0.0400). Not a net win on a 30-rep same-fact stress test (confirmed final totals: ground=102,207
+   forward passes, gallop=133,858, overall 0.8x -- i.e. 31% more total passes over the whole run,
+   because most of that benchmark's workload sits in the fully-converged tail where the plateau
+   dominates) -- but a large, real win specifically in reps 1-4 (65.9x, 3.2x, 2.2x, 1.2x), which is
+   the regime a real multi-fact curriculum mostly lives in (most facts seen only a handful of times,
+   not drilled dozens of times running). Full numbers:
    `lucy_west_galloping_candidate_selection_result_20261101.md` and
    `lucy_west_binary_bisection_candidate_selection_negative_20261101.md` in project memory.
 
@@ -140,3 +142,8 @@ Neither is wired into production. The honest open question going into real train
 whether galloping's early-rep win is enough in practice, or whether the mature-fact plateau cost
 needs a further fix (a smarter growth schedule, a cheaper real-loss proxy, or accepting the cost
 as the price of exactness) before this is affordable at scale.
+
+**Status as of 2026-11-01: this arc is closed pending real multi-fact training data.** The core bug
+(flip-avalanche) is solved and verified with zero float shadow weight. The cost question has a
+real, bounded, partial answer (galloping) but not a final one -- the next real step is testing it
+against an actual multi-fact curriculum once one exists, not further single-fact tuning.
