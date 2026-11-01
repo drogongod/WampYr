@@ -40,7 +40,12 @@ class FixedStepBrick(NativeQuinaryCharLM):
     speed/floor: N=1000 crosses into the exact sentence at rep 30 (floor ~0.16 nats); UNCAPPED
     (full real candidate pool) crosses at rep 8, floor 0.002-0.004 nats by rep 20-40, no ceiling
     found yet -- see staggered_flip_test.py/_v2.py/_v3.py in this directory and
-    lucy_west_validated_subset_exact_generation_breakthrough_20261101.md in project memory. The
+    lucy_west_validated_subset_exact_generation_breakthrough_20261101.md in project memory.
+    CHEAPER SELECTION (staggered_flip_test_v4.py): top-down bisection is a NEGATIVE result
+    (unbounded-bad, 3.2x MORE total passes than brute force once failures get common); galloping/
+    doubling search (grow batch only on success, snap to 1 on failure) is BOUNDED (plateaus 0.7-
+    0.8x overhead, matching quality) and a large real win in the first few reps (65.9x/3.2x/2.2x/
+    1.2x) -- see lucy_west_galloping_candidate_selection_result_20261101.md. Neither wired in. The
     weight representation and this class's own update rule were never the problem; committing
     every proposed flip in one call simultaneously was ("flip-avalanche," quantitatively confirmed
     in discrete_endpoint_audit.py). That fix is NOT wired into this class's own

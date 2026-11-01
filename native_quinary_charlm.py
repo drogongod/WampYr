@@ -315,6 +315,14 @@ class NativeQuinaryCharLM:
     # lucy_west_validated_subset_exact_generation_breakthrough_20261101.md in project memory. Not
     # ported into this production method yet: real compute cost (N forward passes checked per
     # call) and single-fact/single-seed scope need addressing first.
+    # CHEAPER SELECTION, tested 2026-11-01 (staggered_flip_test_v4.py): top-down bisection (test
+    # whole ranges, shrink on failure) is a NEGATIVE result -- unbounded-bad, 3.2x MORE total
+    # forward passes than brute force once failures get common. Galloping/doubling search (grow
+    # batch size only after success, snap to 1 on failure) is BOUNDED -- plateaus at 0.7-0.8x
+    # overhead instead of spiraling, matching quality -- and is a large real win specifically in
+    # the first few reps (65.9x/3.2x/2.2x/1.2x), the regime a real multi-fact curriculum mostly
+    # lives in. Neither wired in here yet -- see
+    # lucy_west_galloping_candidate_selection_result_20261101.md in project memory.
     def _residual_update_level(self, name, level, grad):
         """Residual-carry update for a quinary-LEVEL weight. Returns the new int8 level array.
         BOTH stages (momentum AND the level-threshold step) now use integer residual-carry --
