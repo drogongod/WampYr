@@ -44,6 +44,88 @@ EMB_DECAY_DIV = 2000   # weight decay for Wemb only (the quinary weights are sel
                        # restoring force -- found missing by a real-corpus overflow, see
                        # _residual_update_wide's comment). Same constant/pattern already proven
                        # in lutgtlm_fast.py's WEIGHT_DECAY_DIV, not re-guessed.
+BIAS_CEIL = 6.0        # 2026-10-28: b/bg (the tanh/sigmoid pre-activation biases) had NO restoring
+                       # force at all -- unlike every quinary weight array, which is self-bounding
+                       # via the +-2 level clip. Confirmed by direct measurement: real bricks in
+                       # amelia_teaches_lucy_mind.npz grew |b| up to 244 MILLION, saturating tanh/
+                       # sigmoid into an INPUT-INDEPENDENT CONSTANT (verified: 5 different forced
+                       # inputs produced bit-identical hidden states) -- the brick wasn't weak, it
+                       # was dead. 6.0 is real headroom under PG_CLIP=40 (sig_stable's own clip),
+                       # chosen as a first-pass value in a 3-way A/B (baseline/divisive/relay, see
+                       # sovereigncore_paired_relay_dam_cups_visualization.md) -- NOT yet swept
+                       # against a real multi-fact production run, revisit if evidence warrants.
+                       # Implements the real historical PairedRelay "dam" mechanism, not a plain
+                       # clip or decay: only the over-ceiling COMPONENT is clipped (the node keeps
+                       # whatever already fits and "behaves as normal"); the shed excess is handed
+                       # to BrickCluster (this class has no sibling visibility) via
+                       # _last_excess_b/_last_excess_bg for relay to OTHER bricks, consumed on
+                       # their own next learn_batch call (one-call time delay) -- never discarded,
+                       # never routed back into this same brick's own history.
+BIAS_CORROB_ENABLED = True  # 2026-10-29, FLIPPED ON for a real live-checkpoint test (Private only,
+                       # not yet ported to PublicLucyWEST's copy) -- isolation-tested and re-A/B'd
+                       # clean against real corpus data (worst case 16.7x -> 1.008x overflow-shed,
+                       # gated on brick_pos[idx].n >= BIAS_CORROB_REUSE_THRESHOLD) before being
+                       # trusted here. Purpose of this run: the 13 bricks de-poisoned by BIAS_CEIL
+                       # on 2026-10-28 were left PINNED at the ceiling (clipped, not actually freed
+                       # to learn/forget) -- this flag is what should let a corroborated new signal
+                       # actually move their bias away from 6.0 again instead of just sitting there.
+                       # additive alongside BIAS_CEIL/_clip_and_shed
+                       # (never a replacement for it -- see note below). Real-code test of the
+                       # "equations compete by predictive fitness, corroboration required to win"
+                       # reframe worked out this session (jonathan_firsthand_neurological_memory_
+                       # account.md; validated first on a scalar toy, toy_corroboration_gated_test.py,
+                       # where a naive winner-take-all rule was exploitable by a single outlier until
+                       # a same-direction corroboration streak was required to commit a full step).
+                       # Per-bias-DIMENSION: track how many CONSECUTIVE calls the gradient's sign
+                       # agreed with the previous call's sign; only once that streak reaches
+                       # BIAS_CORROB_THRESHOLD does this dimension take the normal, full step --
+                       # otherwise it takes a damped (BIAS_CORROB_DAMPEN x) step. A single noisy or
+                       # contradictory batch can therefore only ever nudge a bias a little; a
+                       # genuinely sustained, repeated signal still moves it at full, undamped speed
+                       # once corroborated, so this is NOT "nothing can change" -- it is "noise can't
+                       # win, repeated real signal still can."
+                       # HONEST SCOPE, do not overclaim: this guards against NOISE/single-outlier
+                       # corruption, NOT against the kind of SUSTAINED, persistently-one-signed
+                       # feedback loop that actually caused the real 244-million-magnitude bias
+                       # runaway (that was a genuinely consistent gradient direction over very many
+                       # calls, which would satisfy corroboration every time and keep moving at full
+                       # speed) -- BIAS_CEIL + _clip_and_shed remains the correct, already-tested,
+                       # already-applied-to-the-live-checkpoint defense against THAT failure mode,
+                       # and must never be removed or bypassed by this flag. These are complementary,
+                       # not alternative, mechanisms.
+                       # REAL ISOLATION FINDING, 2026-10-29 -- a first real multi-seed A/B
+                       # (real_corpus_ab_test.py, 3 seeds, real donor-taught corpus) came back
+                       # MIXED: seed 1 improved (0.33x overflow), seeds 0/2 got WORSE (17x/4x). Not
+                       # noise -- stratifying every call by how many times its OWN target brick had
+                       # already been reactivated (isolation_test_bias_corrob.py) showed the split
+                       # is CLEAN and consistent across all 3 seeds: on bricks reactivated <3 times
+                       # before this call, corroboration-gating made shed mass ~10x WORSE
+                       # (aggregate 756 calls); on bricks reactivated >=3 times, it made it ~3x
+                       # BETTER (aggregate 444 calls). A brick that's rarely reactivated almost
+                       # never gets the SECOND same-direction call this mechanism needs to ever
+                       # actually corroborate, so every challenge just sits damped until BIAS_CEIL
+                       # eventually forces a correction anyway -- and that forced correction can be
+                       # larger than the small, frequent, undamped corrections the plain rule would
+                       # have made along the way. Seed 1's "success" was never random: it happened
+                       # to land mostly on well-reused bricks. FIX: `corrob_eligible` parameter on
+                       # `learn_batch`, set by BrickCluster.learn_line from the SAME reuse-count
+                       # bookkeeping it already owns (brick_pos[idx].n, read BEFORE this call's own
+                       # update) -- gating only engages once a brick has earned enough reuse for
+                       # "corroboration" to be a meaningful concept at all; otherwise falls back to
+                       # the plain, already-proven rule. See BIAS_CORROB_REUSE_THRESHOLD in
+                       # brick_cluster_charlm.py (that file owns reuse bookkeeping, this one doesn't
+                       # have sibling/history visibility, same separation already used for
+                       # pending_relay's visited-history).
+BIAS_CORROB_THRESHOLD = 2  # consecutive same-sign calls needed to earn a full step -- reused, not
+                       # re-derived: matches this same session's own recurring "needs 2-3
+                       # confirmations" number (MAX_RELAY_HOPS=3 in brick_cluster_charlm.py,
+                       # Jonathan's own "bounces more than two or three times" framing).
+BIAS_CORROB_DAMPEN = 0.2   # step multiplier applied while NOT yet corroborated -- small toy-tested
+                       # value (see toy_corroboration_gated_test.py's bounded-fallback-step finding:
+                       # an uncorroborated step must be small in ABSOLUTE terms, not just a fraction
+                       # of the raw gradient, since a fraction of a huge outlier gradient is still
+                       # huge -- the raw step here is already tiny (1e-4 scale), so a flat multiplier
+                       # is sufficient at this magnitude, unlike the toy's unscaled scalar case).
 MAX_EMB = 5 * EQ       # HARD CLIP, found necessary 2026-10-08: decay alone was far too weak --
                        # measured max|Wemb| growing 3839->8311->14656, an ACCELERATING runaway
                        # (bigger embedding -> bigger activation -> bigger gradient -> bigger
@@ -106,8 +188,29 @@ class NativeQuinaryCharLM:
         self.Wo = randlevel(V, D)
         self.Wemb = (rng.uniform(-1, 1, (D, V)) * EQ).astype(np.int64)    # wide fixed-point, not level-restricted
         self.b = np.zeros(D, np.float64); self.bg = np.zeros(D, np.float64)
+        # PairedRelay dam/cups state (2026-10-28, redesigned same day to be loop-proof -- Jonathan's
+        # explicit requirement: "at no time can the signal ever return... it has to go elsewhere").
+        # pending_relay is a LIST of (b_contrib, bg_contrib) packets relayed IN from siblings,
+        # consumed (folded into b/bg one at a time) at the start of THIS brick's next learn_batch
+        # call -- a list, not a single summed array, because each packet's own visited-brick
+        # history (tracked by BrickCluster, which has sibling visibility this class does not) must
+        # stay distinguishable until the moment it's actually folded in and re-clipped, or a loop
+        # could reopen (confirmed directly: summing packets together before checking overflow is
+        # what let bricks 65/128 -- each other's #1 most-similar sibling -- bounce ~150M back and
+        # forth in near-constant magnitude for 20000+ hops, see repair_bias_runaway.py's dry run).
+        # _last_relay_excess is the list of (excess_b, excess_bg) this call's consumption produced,
+        # one per packet consumed, same order -- for BrickCluster to re-relay onward with each
+        # packet's OWN carried-forward history. _last_excess_* is this brick's own fresh shed
+        # excess from its normal end-of-call bias update (a brand-new packet, history starts here).
+        self.pending_relay = []
+        self._last_relay_excess = []
+        self._last_excess_b = np.zeros(D, np.float64); self._last_excess_bg = np.zeros(D, np.float64)
         self._res = {}; self._mom = {}
         self._total_in = {}; self._total_consumed = {}
+        # BIAS_CORROB_ENABLED state (2026-10-29, default off, see constant's comment) -- per-
+        # dimension consecutive-same-sign streak, independently for b and bg.
+        self._b_streak_count = np.zeros(D, np.int64); self._b_streak_sign = np.zeros(D, np.int8)
+        self._bg_streak_count = np.zeros(D, np.int64); self._bg_streak_sign = np.zeros(D, np.int8)
 
     def _integer_ema(self, name, grad_int):
         """Integer EMA with its OWN residual-carry -- the exact already-proven _ema() pattern
@@ -196,6 +299,22 @@ class NativeQuinaryCharLM:
         self._mom[name + "_numres"] = numres
         return scaled
 
+    # KNOWN LIMITATION, ROOT CAUSE MEASURED, FIX NOT YET WIRED HERE (2026-11-01): this method
+    # commits every weight whose |res| crosses THRESHOLD in ONE call, all at once. Real per-flip
+    # finite-difference measurement (discrete_endpoint_audit.py) proved most of those individual
+    # flips are each independently correct, but committing them simultaneously produces a measured
+    # destructive interaction of +2 to +7 nats -- "flip-avalanche," quantitatively confirmed, see
+    # QUINARY_OSCILLATION_HANDOFF_20261029.md's RESOLVED section. The working fix
+    # (staggered_flip_test_v2.py/_v3.py, this directory): rank candidate flips by confidence,
+    # greedily accept/reject each by REAL re-measured loss on a frozen trial snapshot, commit only
+    # what measurably helps, defer the rest (still intact in `res`, never discarded) -- and include
+    # Wemb's own flips in the SAME ranked pool (it's exempt here, via _residual_update_wide below).
+    # Budget determines speed/floor: N=1000 crosses into the EXACT correct sentence at rep 30
+    # (floor ~0.16 nats); UNCAPPED (full real candidate pool) crosses at rep 8, floor 0.002-0.004
+    # nats by rep 20-40, no ceiling found yet -- see
+    # lucy_west_validated_subset_exact_generation_breakthrough_20261101.md in project memory. Not
+    # ported into this production method yet: real compute cost (N forward passes checked per
+    # call) and single-fact/single-seed scope need addressing first.
     def _residual_update_level(self, name, level, grad):
         """Residual-carry update for a quinary-LEVEL weight. Returns the new int8 level array.
         BOTH stages (momentum AND the level-threshold step) now use integer residual-carry --
@@ -225,6 +344,11 @@ class NativeQuinaryCharLM:
         self._res[name] = res
         return new_level
 
+    # See the KNOWN LIMITATION note above _residual_update_level: Wemb updated through THIS method
+    # is exactly the "exempt from validation" case that made the N=150/N=400 validated-subset test
+    # worse than matrices-only until the budget was raised to N=1000 and Wemb's flips were pulled
+    # into the same checked candidate pool -- lucy_west_validated_subset_exact_generation_
+    # breakthrough_20261101.md.
     def _residual_update_wide(self, name, W, grad):
         """Same doubly-lossless residual-carry pattern for the wide-range embedding, PLUS weight
         decay. BUG FOUND 2026-10-08, real-corpus test (100KB voice_corpus slice): unlike
@@ -262,11 +386,35 @@ class NativeQuinaryCharLM:
         self._total_discarded[name] = self._total_discarded.get(name, 0) + discarded
         return clipped
 
+    def _corroborated_bias_step(self, current, grad, lr_scale, streak_count, streak_sign):
+        """BIAS_CORROB_ENABLED update, see that constant's comment for full context and honest
+        scope. Per-dimension: a gradient whose sign agrees with the PREVIOUS call's sign extends
+        the streak; disagreement (or zero) resets it to 1. Only once the streak reaches
+        BIAS_CORROB_THRESHOLD does this dimension take the real, full step -- otherwise it takes a
+        damped step. Returns (new_value, new_streak_count, new_streak_sign); the caller still runs
+        _clip_and_shed on the result exactly as before -- this function only changes how fast a
+        bias moves in response to inconsistent vs. repeated-consistent gradient signal, never
+        whether it is eventually bounded."""
+        raw_step = lr_scale * 1e-4 * grad
+        sign = np.sign(grad).astype(np.int8)
+        agrees = (sign != 0) & (sign == streak_sign)
+        new_streak_count = np.where(agrees, streak_count + 1, 1)
+        new_streak_sign = np.where(sign != 0, sign, streak_sign)
+        corroborated = new_streak_count >= BIAS_CORROB_THRESHOLD
+        effective_step = np.where(corroborated, raw_step, raw_step * BIAS_CORROB_DAMPEN)
+        new_value = current - effective_step
+        return new_value, new_streak_count, new_streak_sign
+
     def export_state(self):
         """Full state for checkpointing -- includes residual/momentum accumulators, not just the
         weights, so a save/load cycle loses NOTHING (the whole point of this architecture)."""
+        # NOTE: pending_relay (list of in-flight packets) and their visited-histories are NOT
+        # serialized here -- BrickCluster owns that (it's the only thing that knows OTHER bricks
+        # exist, which the visited-history needs), see BrickCluster.export_state/load_state.
         state = dict(Win=self.Win, Wh=self.Wh, Wgx=self.Wgx, Wgh=self.Wgh, Wo=self.Wo,
-                     Wemb=self.Wemb, b=self.b, bg=self.bg)
+                     Wemb=self.Wemb, b=self.b, bg=self.bg,
+                     b_streak_count=self._b_streak_count, b_streak_sign=self._b_streak_sign,
+                     bg_streak_count=self._bg_streak_count, bg_streak_sign=self._bg_streak_sign)
         for k, v in self._res.items():
             state["res__" + k] = v
         for k, v in self._mom.items():
@@ -281,7 +429,18 @@ class NativeQuinaryCharLM:
         self.Win = state["Win"]; self.Wh = state["Wh"]; self.Wgx = state["Wgx"]
         self.Wgh = state["Wgh"]; self.Wo = state["Wo"]; self.Wemb = state["Wemb"]
         self.b = state["b"]; self.bg = state["bg"]
-        for key in state.files if hasattr(state, "files") else state.keys():
+        # pending_relay/_last_relay_excess are set by BrickCluster.load_state (it owns the paired
+        # visited-histories); default here covers direct/standalone use of this class.
+        self.pending_relay = []; self._last_relay_excess = []
+        self._last_excess_b = np.zeros(self.D, np.float64); self._last_excess_bg = np.zeros(self.D, np.float64)
+        state_keys = state.files if hasattr(state, "files") else state.keys()
+        # BIAS_CORROB_ENABLED streak state (2026-10-29) -- backward-compatible default (zeros) for
+        # any checkpoint saved before this existed, same pattern as pending_relay's own backcompat.
+        self._b_streak_count = state["b_streak_count"] if "b_streak_count" in state_keys else np.zeros(self.D, np.int64)
+        self._b_streak_sign = state["b_streak_sign"] if "b_streak_sign" in state_keys else np.zeros(self.D, np.int8)
+        self._bg_streak_count = state["bg_streak_count"] if "bg_streak_count" in state_keys else np.zeros(self.D, np.int64)
+        self._bg_streak_sign = state["bg_streak_sign"] if "bg_streak_sign" in state_keys else np.zeros(self.D, np.int8)
+        for key in state_keys:
             if key.startswith("res__"):
                 self._res[key[5:]] = state[key]
             elif key.startswith("mom__"):
@@ -379,7 +538,29 @@ class NativeQuinaryCharLM:
                 break
         return "".join(itos[i] for i in out)
 
-    def learn_batch(self, idxs_batch, lr_scale=1.0):
+    def consume_pending_relay(self):
+        """Fold any queued relay-IN packets into b/bg one at a time via the same clip-and-shed dam
+        logic, WITHOUT doing a training step. Called at the start of learn_batch (the one-call time
+        delay -- "a few moments later" -- see sovereigncore_paired_relay_dam_cups_visualization.md),
+        and reusable standalone by one-time maintenance passes (repair_bias_runaway.py) that need to
+        drain a backlog without touching gradients. Each packet is folded and re-clipped SEPARATELY,
+        not summed together first -- summing before checking overflow is what let a reopened loop
+        hide (two packets each individually fine could together overflow, and the combined excess
+        would lose which sibling(s) it came from). Returns the per-packet excess list; also stashed
+        on self._last_relay_excess for learn_batch's caller (BrickCluster) to read."""
+        consumed = self.pending_relay
+        self.pending_relay = []
+        relay_excess = []
+        for b_contrib, bg_contrib in consumed:
+            self.b, exb = self._clip_and_shed(self.b + b_contrib, BIAS_CEIL)
+            self.bg, exbg = self._clip_and_shed(self.bg + bg_contrib, BIAS_CEIL)
+            relay_excess.append((exb, exbg))
+        self._last_relay_excess = relay_excess
+        return relay_excess
+
+    def learn_batch(self, idxs_batch, lr_scale=1.0, corrob_eligible=True):
+        self.consume_pending_relay()
+
         B = len(idxs_batch); T = len(idxs_batch[0])
         idxs_arr = np.array(idxs_batch, dtype=np.int64)
         D = self.D
@@ -449,9 +630,32 @@ class NativeQuinaryCharLM:
         self.Wgh = self._residual_update_level("Wgh", self.Wgh, scale_int(gWgh))
         self.Wo = self._residual_update_level("Wo", self.Wo, scale_int(gWo))
         self.Wemb = self._residual_update_wide("Wemb", self.Wemb, scale_int(gWemb * EQ))
-        self.b = self.b - lr_scale * 1e-4 * gb; self.bg = self.bg - lr_scale * 1e-4 * gbg
+        if BIAS_CORROB_ENABLED and corrob_eligible:
+            new_b, self._b_streak_count, self._b_streak_sign = self._corroborated_bias_step(
+                self.b, gb, lr_scale, self._b_streak_count, self._b_streak_sign)
+            new_bg, self._bg_streak_count, self._bg_streak_sign = self._corroborated_bias_step(
+                self.bg, gbg, lr_scale, self._bg_streak_count, self._bg_streak_sign)
+        else:
+            new_b = self.b - lr_scale * 1e-4 * gb
+            new_bg = self.bg - lr_scale * 1e-4 * gbg
+        self.b, self._last_excess_b = self._clip_and_shed(new_b, BIAS_CEIL)
+        self.bg, self._last_excess_bg = self._clip_and_shed(new_bg, BIAS_CEIL)
 
         return loss / max(1, n)
+
+    @staticmethod
+    def _clip_and_shed(vec, ceil):
+        """The dam: a component exceeding the container's capacity is clipped to the ceiling (this
+        brick keeps only what fits and 'behaves as normal'); the excess is returned separately, not
+        discarded, for BrickCluster.learn_line to relay to sibling bricks. Never applied to any
+        OTHER brick from here -- this class has no notion of siblings."""
+        over = np.abs(vec) > ceil
+        excess = np.zeros_like(vec)
+        if np.any(over):
+            excess[over] = vec[over] - np.sign(vec[over]) * ceil
+        clipped = vec.copy()
+        clipped[over] = np.sign(vec[over]) * ceil
+        return clipped, excess
 
 
 def _smoke_test():

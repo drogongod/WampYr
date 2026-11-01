@@ -125,6 +125,14 @@ def serve(host: str = "127.0.0.1", port: int = 8105):
     from server import ensure_server
     ensure_server()
     engine = BrickClusterEngine()
+    # 2026-10-29: the "fallback, cheap, continuous" background learning loop (Jonathan's own
+    # long-standing design, see autonomous_teach_loop.py's own docstring for the full account) --
+    # auto-absorbs facts that have sat pending-and-unreviewed past a grace period, one at a time,
+    # using ONLY the already-tested accept_experience(action="accept") path (never fabricates
+    # content). Runs for the lifetime of this server process; VAMPIRE_AUTO_TEACH=0 disables it.
+    import autonomous_teach_loop
+    from brickcluster_engine import EXPERIENCE_LOG, DATA
+    autonomous_teach_loop.start(engine, EXPERIENCE_LOG, DATA / "experience" / "autonomous_teach_loop.jsonl")
     httpd = LucyHTTPServer((host, port), Handler, engine)
     print(f"Lucy BrickCluster API listening at http://{host}:{port}", flush=True)
     print("Visible prose is donor-assisted until Lucy can answer without the donor.", flush=True)

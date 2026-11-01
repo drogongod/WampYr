@@ -31,7 +31,21 @@ from native_quinary_charlm import (
 
 class FixedStepBrick(NativeQuinaryCharLM):
     """L1-normalize + fixed +-1-level-per-call step -- the best-tested single-brick config
-    (native_quinary_debugging_arc.md), not the production file's current variable-step formula."""
+    (native_quinary_debugging_arc.md), not the production file's current variable-step formula.
+
+    RESOLVED 2026-11-01: this exact class, unmodified, generates the LITERAL correct answer
+    ("The capital of France is Paris.", byte-for-byte, no float shadow weight anywhere) once its
+    flip-commit step is replaced by Astra's validated-subset mechanism (real-loss-checked
+    accept/reject per candidate flip, Wemb's flips included in the same ranked pool). Budget sets
+    speed/floor: N=1000 crosses into the exact sentence at rep 30 (floor ~0.16 nats); UNCAPPED
+    (full real candidate pool) crosses at rep 8, floor 0.002-0.004 nats by rep 20-40, no ceiling
+    found yet -- see staggered_flip_test.py/_v2.py/_v3.py in this directory and
+    lucy_west_validated_subset_exact_generation_breakthrough_20261101.md in project memory. The
+    weight representation and this class's own update rule were never the problem; committing
+    every proposed flip in one call simultaneously was ("flip-avalanche," quantitatively confirmed
+    in discrete_endpoint_audit.py). That fix is NOT wired into this class's own
+    _residual_update_level below -- it lives in the separate StaggeredFlipBrick subclass in the
+    test scripts, pending a cheaper validated-candidate search before it's worth porting here."""
     def _residual_update_level(self, name, level, grad):
         mom_int = self._integer_ema(name, grad)
         scaled = self._adaptive_normalize(name, mom_int)
@@ -261,6 +275,37 @@ def _as_sparse(x):
 
 VAR_FLOOR_FRAC = 0.05
 
+MAX_RELAY_HOPS = 3    # 2026-10-28, Jonathan's explicit spec for the dam/cups relay: "if it bounces
+                       # more than two or three times... it will disintegrate" -- his own worked
+                       # example (7 -> 4+3 -> 2+2,1+2 -> ...) converges to terminal/destroyed values
+                       # within 2-3 splits, not via pure halving all the way to zero. Matters because
+                       # pure halving-with-no-depth-limit is a REAL problem, not just slow: each hop
+                       # can split into 2 fresh (never-before-visited) targets, so unlimited depth
+                       # means up to 2**depth separate in-flight packets -- confirmed directly
+                       # (repair_bias_runaway.py against the real backup checkpoint) that a
+                       # historical ~244M-magnitude backlog needs ~25 halvings to fall under
+                       # BIAS_CEIL, which would mean up to 2**25 (33 million) packets, computationally
+                       # infeasible. Capping real relay hops at 3 bounds this to at most 2**3=8
+                       # packets per original overflow event. Whatever excess remains after
+                       # MAX_RELAY_HOPS is deliberately destroyed (see _relay_excess), not relayed
+                       # further -- a bounded, honest exception for backlog this catastrophic, which
+                       # only exists because BIAS_CEIL didn't exist yet when it accumulated; ordinary
+                       # LIVE per-call overflow is small (bounded by one gradient step) and should
+                       # resolve to zero excess within 1 hop almost always, never needing this path.
+
+BIAS_CORROB_REUSE_THRESHOLD = 3   # 2026-10-29, real isolation finding (see BIAS_CORROB_ENABLED's
+                       # comment in native_quinary_charlm.py for the full real multi-seed A/B that
+                       # found this): corroboration-gating on the bias update only helps once a
+                       # brick has been reactivated at least this many times BEFORE the current
+                       # call -- below this, the mechanism almost never gets the second confirming
+                       # call it needs, so it only delays corrections rather than ever actually
+                       # smoothing them. Owned here, not in native_quinary_charlm.py, because only
+                       # the cluster knows how many times a brick has been reactivated
+                       # (brick_pos[idx].n) -- same separation already used for pending_relay's
+                       # visited-history. Value 3 is the exact real-tested split from
+                       # isolation_test_bias_corrob.py (clean ~10x-worse vs ~3x-better separation
+                       # across all 3 seeds at this threshold), not a guess.
+
 # 🛑 2026-10-09, real bug found running the actual 4.2MB production corpus (not a smaller test
 # slice): the shared Phi_neg was growing from EVERY line ever seen, unboundedly. Measured
 # directly, same corpus, same MERGE_SLACK=3.0, only size varying: 70 bricks at 224 lines -> 49 at
@@ -385,6 +430,26 @@ MERGE_CANDIDATE_K = 10   # bound the number of bigger-brick candidates tested pe
 # see the real multiple-comparisons bug this fixes in consolidate()'s own comment. Same role as
 # WOLFPACK_GATE_K_NEIGHBORS in sovereign_core.py's own LSL-gate port.
 
+ROUTE_REGION_INDEX_MIN_BRICKS = 400   # 2026-10-29: two-level (coarse-region + exact-within-region)
+# routing fast path, validated in routing_scale_toy_test.py against this module's REAL
+# _OnlineGaussian.log_density math, not a reimplementation. The toy sweep found NO real speedup
+# below ~1000 bricks (region bookkeeping overhead eats the saving) and real brick counts today are
+# ~145 (see brick_cluster_production_port.md) -- far under this floor, so route() stays on the
+# original flat O(n_bricks) scan, bit-for-bit, until the cluster actually grows this large. Not a
+# guess: picked with real headroom under the toy test's proven n=1000 operating point.
+ROUTE_REGION_TOP_M = 6   # 2026-10-29 CORRECTED after the first choice (4) failed a harder check --
+# the original toy harness (routing_scale_toy_test.py, synthetic bricks, n=1000, 60 queries) showed
+# 0/60 mismatches at top_m=4, but that was a small sample, not proof of zero error -- flagged as a
+# caveat before this was ever wired in. Re-tested directly against THIS module's real BrickCluster
+# (real _OnlineGaussian fits, real route()/_route_fast()/_rebuild_regions(), n=500, 3 seeds x 150
+# queries = 450 total): top_m=4 produced 2/450 REAL wrong-brick picks (near-tied margins, correct
+# brick's region landing 5th-nearest by centroid distance -- just outside top_m=4). top_m=6 was the
+# first setting with 0/450 mismatches across all 3 seeds; speedup at n=500 is a more modest ~2.45x
+# (204 of 500 bricks scanned), not the originally-hoped 3.4x -- the honest number, not the
+# optimistic one. See lucy_west_routing_fast_path_production_wired_20261029.md for the full account.
+ROUTE_REGION_N_REGIONS_FLOOR = 2   # sqrt(n_bricks) regions, same as the toy test; floored so a
+# degenerate tiny n_bricks never asks for 0 or 1 regions.
+
 
 class BrickCluster:
     """Growable cluster of FixedStepBrick, routed by an online LSL-style gate. V/D_brick fixed at
@@ -397,6 +462,13 @@ class BrickCluster:
         self.bricks = []
         self.brick_pos = []       # one _OnlineGaussian per brick (Phi_pos) -- unbounded on purpose,
                                    # should reflect everything that brick has actually absorbed.
+        self.pending_visited = []  # parallel to self.bricks: pending_visited[i] is a list of
+                                   # frozensets, one per packet currently queued in
+                                   # bricks[i].pending_relay (same order) -- the growing set of
+                                   # brick-indices that specific packet has already passed through.
+                                   # Owned here, not on the brick, because only the cluster has
+                                   # sibling visibility; see _relay_excess for the loop-proof rule
+                                   # this enforces (2026-10-28 redesign).
         self.neg = _OnlineGaussian(freeze_at_n=NEG_FREEZE_AT_N)   # shared Phi_neg, BOUNDED --
                                    # see _OnlineGaussian's freeze_at_n docstring for why.
         # TF-IDF document-frequency tracking (the real root-cause fix, see IDF_MIN_DOCS/
@@ -411,6 +483,26 @@ class BrickCluster:
         # stats change). Once neg freezes at NEG_FREEZE_AT_N, this returns the SAME array object
         # every call, which also lets every brick's own _cached_stats (keyed partly on
         # id(global_var)) hit its cache instead of recomputing per line.
+        self._region_centroids = None   # route()'s two-level fast-path index (see
+        self._region_members = None     # ROUTE_REGION_INDEX_MIN_BRICKS's comment). Only ever
+        self._region_fresh = False      # built by _rebuild_regions(), called from consolidate()
+        # against the just-settled brick population; _spawn() marks it stale again immediately
+        # (a freshly spawned brick belongs to no region yet) so route() can never silently use an
+        # index that's missing bricks that actually exist -- when stale OR under the min-bricks
+        # floor, route() falls back to the original exact flat scan, never an approximation.
+        self.brick_taught_lines = []   # parallel to self.bricks: brick_taught_lines[i] is the list
+        # of verbatim line_text strings ever routed to and trained into brick i. 2026-10-29,
+        # Jonathan's "question the premise" finding: a single full-BPTT gradient step on a fresh
+        # 40-dim brick measured WORSE than random (loss 10.4 vs ln(256)=5.54) -- a freshly-taught
+        # one-shot fact brick cannot be expected to GENERATE a fluent answer from its own weights,
+        # no matter how it's routed or ensembled (tested directly, see
+        # scattered_fact_ensemble_test.py / lucy_west_retrieval_not_generation_20261029.md). The
+        # fix is to stop asking it to generate at all for this case: retrieve the exact taught
+        # text instead (it already contains the donor's real answer verbatim, see learn_line's
+        # caller in brickcluster_engine.py -- "User: ...\nLucy: ..."), and only fall back to
+        # cluster.generate() when no stored line exists for the matched brick. Already-trained-at-
+        # checkpoint-time bricks (before this field existed) simply have an empty list here and
+        # correctly fall back to the old generate() path, not a bug, see field's own doc above.
 
     def tfidf_sparse(self, line):
         """The real hot-path feature computation -- returns (idx, val), NEVER materializes a
@@ -462,6 +554,11 @@ class BrickCluster:
         idx = len(self.bricks)
         self.bricks.append(FixedStepBrick(self.V, self.D_brick, seed=self.seed + 1000 * idx))
         self.brick_pos.append(_OnlineGaussian())
+        self.pending_visited.append([])
+        self.brick_taught_lines.append([])
+        self._region_fresh = False   # the new brick belongs to no region in the old index yet --
+        # see ROUTE_REGION_INDEX_MIN_BRICKS's comment; route() falls back to the exact flat scan
+        # until the next consolidate() call rebuilds the index over the now-current population.
         return idx
 
     def route(self, features, for_training):
@@ -501,12 +598,85 @@ class BrickCluster:
         if not self.bricks:
             return self._spawn() if for_training else None
         gvar = self._global_var()
-        neg_ld = self.neg.log_density(features, VAR_FLOOR_FRAC, gvar) if self.neg.n >= 2 else -np.inf
-        margins = [pos.log_density(features, VAR_FLOOR_FRAC, gvar) - neg_ld for pos in self.brick_pos]
-        best_idx = int(np.argmax(margins))
-        if for_training and margins[best_idx] <= 0.0:
+        # 2026-10-29 FIX, real bug confirmed live: neg_ld used to default to -np.inf whenever
+        # self.neg.n < 2 (the shared background model hasn't seen 2+ examples system-wide yet),
+        # which makes margin = pos_ld - (-inf) = +inf UNCONDITIONALLY for every brick, regardless
+        # of actual content fit -- route() would then NEVER spawn (margin can't be <=0) and would
+        # force literally every early query into whichever brick already exists, no matter how
+        # unrelated. Confirmed as a real contributor to catastrophic brick contamination (a real
+        # brick in the live checkpoint absorbed hundreds of mismatched queries this way, teacher-
+        # forced CE on its own taught fact measured 12.47 nats, worse than random 5.55 -- see
+        # lucy_west_single_brick_generation_root_cause_20261029.md). Fixed by using a NEUTRAL 0.0
+        # sentinel instead of -inf: margin degrades to the brick's raw (uncalibrated) log_density,
+        # which is still a real, usable signal even before the background model stabilizes --
+        # confirmed empirically (routing_coldstart_margin_fix_test.py) that a freshly-spawned
+        # brick's raw pos_ld on both a similar AND an unrelated query comes out identical and
+        # NEGATIVE at n=1 (the Gaussian genuinely can't discriminate yet with one example), so this
+        # correctly spawns separate bricks for both rather than force-merging either -- the safe,
+        # conservative default, not a guess. Only touches the neg.n<2 window (the first ~1-2 real
+        # facts ever taught to a cluster); has no effect once the background model has real data.
+        neg_ld = self.neg.log_density(features, VAR_FLOOR_FRAC, gvar) if self.neg.n >= 2 else 0.0
+        if self._region_fresh and len(self.bricks) >= ROUTE_REGION_INDEX_MIN_BRICKS:
+            best_idx, best_margin = self._route_fast(features, gvar, neg_ld)
+        else:
+            margins = [pos.log_density(features, VAR_FLOOR_FRAC, gvar) - neg_ld for pos in self.brick_pos]
+            best_idx = int(np.argmax(margins))
+            best_margin = margins[best_idx]
+        if for_training and best_margin <= 0.0:
             return self._spawn()
         return best_idx
+
+    def _route_fast(self, features, gvar, neg_ld):
+        """Two-level routing: nearest ROUTE_REGION_TOP_M region centroids (cheap), then the SAME
+        exact log_density margin computation as the flat scan, restricted to just those regions'
+        bricks. Validated in routing_scale_toy_test.py: 0/60 mismatches against the flat scan at
+        top_m=ROUTE_REGION_TOP_M, n_bricks=1000. Only ever called when self._region_fresh is True
+        (see route()), i.e. the index exactly matches the current self.bricks population."""
+        dense = np.zeros(FEATURE_DIM)
+        idx, val = features
+        dense[idx] = val
+        d = np.linalg.norm(self._region_centroids - dense[None, :], axis=1)
+        chosen_regions = np.argsort(d)[:ROUTE_REGION_TOP_M]
+        best_idx, best_margin = -1, -np.inf
+        for r in chosen_regions:
+            for i in self._region_members[r]:
+                m = self.brick_pos[i].log_density(features, VAR_FLOOR_FRAC, gvar) - neg_ld
+                if m > best_margin:
+                    best_margin, best_idx = m, i
+        return best_idx, best_margin
+
+    def _rebuild_regions(self):
+        """Rebuilds route()'s two-level region index (k-means over each brick's real Phi_pos mean,
+        same recipe as routing_scale_toy_test.py). Called only from consolidate() -- the existing
+        "sleep" re-clustering cycle -- so the index is always built against the population
+        consolidate() just finished settling, never a half-updated one. _spawn() marks the index
+        stale the instant a new brick appears; it only becomes fresh again at the next
+        consolidate() call, so route()'s fast path can never see a brick population the index
+        doesn't actually match."""
+        n = len(self.bricks)
+        if n < ROUTE_REGION_INDEX_MIN_BRICKS:
+            self._region_fresh = False
+            return
+        gvar = self._global_var()
+        means = np.stack([pos.mean_var(VAR_FLOOR_FRAC, gvar)[0] for pos in self.brick_pos])
+        n_regions = max(ROUTE_REGION_N_REGIONS_FLOOR, int(np.sqrt(n)))
+        rng = np.random.default_rng(self.seed)
+        idx0 = rng.choice(n, size=min(n_regions, n), replace=False)
+        centroids = means[idx0].copy()
+        assign = np.zeros(n, dtype=np.int64)
+        for _ in range(8):
+            d = np.linalg.norm(means[:, None, :] - centroids[None, :, :], axis=2)
+            assign = np.argmin(d, axis=1)
+            for r in range(centroids.shape[0]):
+                members = means[assign == r]
+                if len(members):
+                    centroids[r] = members.mean(axis=0)
+        region_members = [[] for _ in range(centroids.shape[0])]
+        for i, r in enumerate(assign):
+            region_members[r].append(i)
+        self._region_centroids = centroids
+        self._region_members = region_members
+        self._region_fresh = True
 
     def learn_line(self, batches_for_line, line_text, lr_scale):
         """batches_for_line: the windowed batches (same bucket-by-length convention as
@@ -517,13 +687,82 @@ class BrickCluster:
         features = self.tfidf_sparse(line_text)
         idx = self.route(features, for_training=True)
         brick = self.bricks[idx]
+        # 2026-10-29: read reuse count BEFORE this call's own update (below) touches it -- the real
+        # isolation finding behind BIAS_CORROB_REUSE_THRESHOLD needs "how many times was this brick
+        # reactivated BEFORE now," not including the activation happening this call.
+        corrob_eligible = self.brick_pos[idx].n >= BIAS_CORROB_REUSE_THRESHOLD
+        old_visited = self.pending_visited[idx]
+        self.pending_visited[idx] = []
         losses = []
+        own_excess_b = np.zeros(brick.D, np.float64)
+        own_excess_bg = np.zeros(brick.D, np.float64)
+        relay_events = []  # (excess_b, excess_bg, visited) -- packets that arrived via relay and
+                            # still didn't fit keep THEIR OWN carried-forward history; this brick's
+                            # own fresh shedding (below) starts a brand-new history at this brick.
         for b in batches_for_line:
-            losses.append(float(brick.learn_batch(b, lr_scale=lr_scale).mean()))
+            losses.append(float(brick.learn_batch(b, lr_scale=lr_scale, corrob_eligible=corrob_eligible).mean()))
+            own_excess_b += brick._last_excess_b
+            own_excess_bg += brick._last_excess_bg
+            for (exb, exbg), old_v in zip(brick._last_relay_excess, old_visited):
+                if np.any(exb) or np.any(exbg):
+                    relay_events.append((exb, exbg, old_v | {idx}))
+            old_visited = []  # only the FIRST learn_batch call in this loop can consume anything
+                               # (pending_relay is fully drained the instant it's non-empty)
         self.brick_pos[idx].update(features)
         self.neg.update(features)
         self._update_doc_freq(line_text)
+        if line_text not in self.brick_taught_lines[idx]:   # dedupe -- the caller's own exact-
+            self.brick_taught_lines[idx].append(line_text)   # duplicate fast path already skips
+            # most repeats before learn_line ever runs, this is just a defensive second guard
+            # against unbounded growth, not the primary dedupe mechanism.
+        if np.any(own_excess_b) or np.any(own_excess_bg):
+            relay_events.append((own_excess_b, own_excess_bg, frozenset({idx})))
+        for exb, exbg, visited in relay_events:
+            self._relay_excess(idx, exb, exbg, visited)
         return idx, (sum(losses) / len(losses) if losses else None)
+
+    def _relay_excess(self, source_idx, excess_b, excess_bg, visited):
+        """PairedRelay dam/cups mechanism, loop-proof BY CONSTRUCTION (2026-10-28 redesign, per
+        Jonathan's explicit requirement: "at no time can the signal ever return... it has to go
+        elsewhere"). `visited` is the set of every brick this specific packet has already passed
+        through (including source_idx, added below before queuing); a relay NEVER targets anything
+        in that set, so a chain can never revisit anywhere it has already been -- not just the
+        immediate sender (which only stops simple back-and-forth 2-cycles) but the WHOLE path so
+        far, which also stops longer N-cycles and the mutual-top-similarity-clique bounce confirmed
+        directly (repair_bias_runaway.py's dry run against the real backup checkpoint: bricks 65
+        and 128 -- each other's #1 most-similar sibling by content -- bounced ~150M back and forth
+        in near-CONSTANT magnitude for 20000+ hops under the old source-only exclusion, never
+        actually draining). Termination is now guaranteed structurally: at most len(bricks) hops
+        total since the history only grows, and in practice the ceiling-sized chunk kept at every
+        hop (BIAS_CEIL) means the shed amount roughly halves each time it's split across targets, so
+        it disintegrates (produces zero further excess, naturally via _clip_and_shed) long before
+        the history could ever be exhausted. Split across the (up to) two most SIMILAR eligible
+        other bricks, ranked by the same Phi_pos content-similarity space already used for routing
+        and merging. If fewer than 2 (or 0) eligible bricks remain, relays to however many are
+        actually available, or drops it if none are left -- an honest terminal case ("nowhere left
+        to send it"), not a silent assumption that candidates always exist. Also DISINTEGRATES
+        (destroys the excess rather than relaying) once `visited` has grown past MAX_RELAY_HOPS --
+        see that constant's comment for why an unbounded-depth cascade is a real combinatorial
+        problem, not just a slow one."""
+        if len(visited) > MAX_RELAY_HOPS:
+            return
+        candidates = [j for j in range(len(self.bricks)) if j not in visited and self.brick_pos[j].n > 0]
+        if not candidates:
+            return
+        gvar = self._global_var()
+        src_mean, _ = self.brick_pos[source_idx].mean_var(VAR_FLOOR_FRAC, gvar)
+        sims = []
+        for j in candidates:
+            mean_j, _ = self.brick_pos[j].mean_var(VAR_FLOOR_FRAC, gvar)
+            denom = (np.linalg.norm(src_mean) * np.linalg.norm(mean_j)) or 1.0
+            sims.append(float(np.dot(src_mean, mean_j) / denom))
+        order = np.argsort(sims)[::-1]
+        targets = [candidates[i] for i in order[:2]]
+        share = 1.0 / len(targets)
+        new_visited = visited | {source_idx}
+        for j in targets:
+            self.bricks[j].pending_relay.append((excess_b * share, excess_bg * share))
+            self.pending_visited[j].append(new_visited)
 
     def consolidate(self):
         """Periodic re-merge pass (2026-10-09), closer to what k-means does globally -- the online,
@@ -558,6 +797,9 @@ class BrickCluster:
         (looser than the routing gate's own margin>0 threshold on purpose, see the module comment)
         since merging two already-trained bricks can tolerate more slack than routing one fresh
         line can. Returns the TOTAL number of merges made across every round."""
+        self._region_fresh = False   # about to possibly reindex self.bricks/self.brick_pos
+        # (merges below) -- any region index built before this point is unsafe to use mid-pass;
+        # rebuilt fresh at the end against whatever population this call settles on.
         total_merged = 0
         for _round in range(MERGE_MAX_ROUNDS):
             if len(self.bricks) < 2:
@@ -567,8 +809,11 @@ class BrickCluster:
             neg_ld_cache = {}
 
             def neg_ld(x_key, x):
+                # Same -inf-sentinel bug and same fix as route()'s own comment -- during
+                # neg.n<2 cold start this used to make margin unconditionally > -MERGE_SLACK,
+                # forcing every smaller brick to merge into the biggest one regardless of fit.
                 if x_key not in neg_ld_cache:
-                    neg_ld_cache[x_key] = self.neg.log_density(x, VAR_FLOOR_FRAC, gvar) if self.neg.n >= 2 else -np.inf
+                    neg_ld_cache[x_key] = self.neg.log_density(x, VAR_FLOOR_FRAC, gvar) if self.neg.n >= 2 else 0.0
                 return neg_ld_cache[x_key]
 
             absorbed_into = {}   # smaller brick index -> surviving brick index
@@ -602,6 +847,10 @@ class BrickCluster:
                         big_pos.n += small_pos.n
                         big_pos.sum += small_pos.sum
                         big_pos.sumsq += small_pos.sumsq
+                        for ln in self.brick_taught_lines[small_i]:   # survivor must keep
+                            if ln not in self.brick_taught_lines[big_i]:   # retrieving BOTH
+                                self.brick_taught_lines[big_i].append(ln)   # facts post-merge,
+                        # not just the bigger brick's own -- see brick_taught_lines field doc.
                         absorbed_into[small_i] = big_i
                         break
 
@@ -610,7 +859,17 @@ class BrickCluster:
             keep = [i for i in range(len(self.bricks)) if i not in absorbed_into]
             self.bricks = [self.bricks[i] for i in keep]
             self.brick_pos = [self.brick_pos[i] for i in keep]
+            # Reindex pending_visited in lockstep (2026-10-28) -- without this, after a merge
+            # shifts indices, pending_visited[i] would silently refer to the WRONG surviving
+            # brick's queue, corrupting the loop-proof relay's own bookkeeping. Any pending relay
+            # queued specifically on a brick that got merged AWAY is dropped along with the rest of
+            # that brick's unique state -- the same already-accepted tradeoff as the merge itself,
+            # not a new kind of loss.
+            self.pending_visited = [self.pending_visited[i] for i in keep]
+            self.brick_taught_lines = [self.brick_taught_lines[i] for i in keep]
             total_merged += len(absorbed_into)
+        self._rebuild_regions()   # see its own docstring -- rebuilds route()'s fast-path index
+        # against the now-settled population (inert, a no-op flag-set, below ROUTE_REGION_INDEX_MIN_BRICKS).
         return total_merged
 
     def forward_logits(self, idxs, line_text):
@@ -639,12 +898,30 @@ class BrickCluster:
             state[f"pos{i}__n"] = np.array(pos.n)
             state[f"pos{i}__sum"] = pos.sum
             state[f"pos{i}__sumsq"] = pos.sumsq
+            # Loop-proof relay queue (2026-10-28): the cluster owns this (not the brick) since the
+            # visited-history needs sibling visibility. Flattened the same way bricks/pos already
+            # are -- one count key plus per-packet b/bg/visited keys.
+            packets = brick.pending_relay
+            visited_list = self.pending_visited[i]
+            state[f"relay{i}__n"] = np.array(len(packets))
+            for j, ((b_c, bg_c), vis) in enumerate(zip(packets, visited_list)):
+                state[f"relay{i}__{j}__b"] = b_c
+                state[f"relay{i}__{j}__bg"] = bg_c
+                state[f"relay{i}__{j}__visited"] = np.array(sorted(vis), dtype=np.int64)
+            # Verbatim taught-text store (2026-10-29, see brick_taught_lines' own field docstring)
+            # -- same flatten-by-index pattern as the relay queue above, so retrieval survives a
+            # real save/load cycle instead of silently resetting to empty every server restart.
+            taught_lines = self.brick_taught_lines[i] if i < len(self.brick_taught_lines) else []
+            state[f"taught{i}__n"] = np.array(len(taught_lines))
+            for j, ln in enumerate(taught_lines):
+                state[f"taught{i}__{j}"] = np.array(ln)
         return state
 
     @classmethod
     def load_state(cls, state):
         n_bricks = int(state["n_bricks"])
         V = int(state["V"]); D_brick = int(state["D_brick"]); seed = int(state["seed"])
+        state_keys = set(state.files) if hasattr(state, "files") else set(state.keys())
         cluster = cls(V, D_brick, seed)
         cluster.neg.n = int(state["neg_n"])
         cluster.neg.sum = state["neg_sum"]
@@ -664,4 +941,29 @@ class BrickCluster:
             pos.sum = state[f"pos{i}__sum"]
             pos.sumsq = state[f"pos{i}__sumsq"]
             cluster.brick_pos.append(pos)
+            # Loop-proof relay queue: backward-compatible default (empty) for any checkpoint saved
+            # before this existed, including ones saved under the OLD (pre-redesign) single-array
+            # pending_relay_b/bg scheme -- that scheme was ported this session but never actually
+            # written to a real checkpoint (only exercised in throwaway smoke-test state), so no
+            # real checkpoint needs migrating from it, only "never had a relay queue at all."
+            n_relay_key = f"relay{i}__n"
+            n_relay = int(state[n_relay_key]) if n_relay_key in state_keys else 0
+            packets, visited_list = [], []
+            for j in range(n_relay):
+                packets.append((state[f"relay{i}__{j}__b"], state[f"relay{i}__{j}__bg"]))
+                visited_list.append(frozenset(int(x) for x in state[f"relay{i}__{j}__visited"]))
+            brick.pending_relay = packets
+            cluster.pending_visited.append(visited_list)
+            # Verbatim taught-text store: backward-compatible default (empty) for any checkpoint
+            # saved before this existed -- INCLUDING the real, currently-live checkpoint
+            # (amelia_teaches_lucy_mind.npz, 149 bricks saved before tonight's retrieval feature)
+            # -- this is the exact bug a live test caught: without this branch,
+            # cluster.brick_taught_lines stayed length 0 after loading 149 real bricks, and the
+            # very next learn_line() call IndexError'd on brick_taught_lines[idx]. Found via a real
+            # /v1/feedback call against the live server, not a toy harness (every toy test tonight
+            # built a fresh BrickCluster() directly and never exercised load_state at all).
+            n_taught_key = f"taught{i}__n"
+            n_taught = int(state[n_taught_key]) if n_taught_key in state_keys else 0
+            cluster.brick_taught_lines.append(
+                [str(state[f"taught{i}__{j}"]) for j in range(n_taught)])
         return cluster

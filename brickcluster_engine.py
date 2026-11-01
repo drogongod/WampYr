@@ -65,10 +65,47 @@ EXPERIENCE_LOG = DATA / "experience" / "teacher_experience_untrusted.jsonl"
 # CRITICAL: lutgtlm_ingest.py's own default STATE points at Galatea's REAL persistent mind
 # (C:/galatea_gtlm/lutgtlm/mind.npz). Override it immediately, before any load/save call, so
 # this engine can never touch that file -- this Lucy build gets its own, separate checkpoint.
-LI.STATE = str(CHECKPOINT_DIR / "lucy_mind.npz")
+# 2026-10-29 FIX: was "lucy_mind.npz" (a second, empty, never-actually-used checkpoint distinct
+# from the real one) -- found live, serving against 0 bricks while the real trained mind sat
+# untouched in amelia_teaches_lucy_mind.npz (145 bricks, the exact file every bias-runaway/
+# corroboration fix tonight was built and tested against). Unified so live "talk" and bulk
+# "train" (amelia_teaches_lucy.py) both read/write the SAME real checkpoint, not two diverged
+# ones.
+LI.STATE = str(CHECKPOINT_DIR / "amelia_teaches_lucy_mind.npz")
 
 REFERENCE_MODEL = "vampire-lucywest"
 REFERENCE_URL = os.environ.get("VAMPIRE_REFERENCE_URL", "http://127.0.0.1:8102")
+# 2026-10-29, now ENABLED -- history matters here, read before flipping back off. Originally built
+# because brick_matched was computed/reported but never used to skip the host call. Set back to
+# False the same night after a live test exposed why: brick_matched is a ROUTING-gate signal (a
+# qualifying brick with positive margin exists), NOT a fluent/correct-generation guarantee -- a
+# matched query returned literal garbled bytes as `candidate` (the still-open single-brick
+# generation-quality bug, lucy_west_single_brick_generation_and_reuse_distribution_20261028).
+# RE-ENABLED after "questioning the premise" (Jonathan): rather than fix single-brick generation
+# (shown separately, same session, to be fundamentally unconverged -- a fresh brick's post-teach
+# loss measured WORSE than random, 10.4 vs ln(256)=5.54 nats -- no amount of ensembling fixed it,
+# scattered_fact_ensemble_test.py), _lucy_candidate now RETRIEVES the exact taught text instead of
+# generating for one-shot facts, and reports WHICH path produced the candidate
+# (candidate_source == "retrieved" vs "generated"). This flag now gates on that distinction (see
+# the call site below), so it can safely skip the donor ONLY for a verbatim retrieved answer --
+# the still-broken generate() path is untouched and still always falls through to the donor.
+LUCY_SKIP_DONOR_WHEN_MATCHED = True
+RETRIEVAL_COSINE_FLOOR = 0.5   # 2026-10-29, real calibration point from
+# retrieval_not_generation_test.py's Test 2 failure (NOT a tuned production threshold, a single
+# measured data point): a brick that has ONLY ever learned one fact (Ringo Starr's aunts) reported
+# margin=+inf -- and so "matched" -- for a COMPLETELY unrelated query ("capital of France"), because
+# route()'s margin = pos_log_density - neg_log_density is undefined (treated as -inf background)
+# until the shared Phi_neg has seen >=2 examples system-wide (BrickCluster.neg.n < 2) -- a cold-
+# start degenerate case in the EXISTING routing gate (_real_margin's own docstring already names a
+# relative of this bug), not something _retrieve_taught_answer introduced. What IS new: before this
+# fix, a false "matched" led to generate()'s garbled output (self-evidently wrong to a reader);
+# with retrieval, the SAME false match returned a FLUENT, CONFIDENT, WRONG answer (the Ringo Starr
+# text, for a France question) -- confirmed cosine sim 0.335 for that wrong pairing vs. 0.945 for
+# the real matching pairing in the same test. This floor rejects weak stored-line matches (falls
+# through to generate(), today's existing behavior) rather than ship a fluent wrong answer. The
+# deeper cold-start margin bug (neg.n<2) is NOT fixed here -- out of scope for tonight, and
+# practically dormant once the real system has more than a couple of facts total (checkpoint
+# neg.n is already far past 2), but worth fixing for real before Public is ever cold-started.
 MAX_HOST_TURNS = max(1, int(os.environ.get("VAMPIRE_HOST_TURNS", "1")))
 MAX_SESSION_TURNS = max(1, int(os.environ.get("VAMPIRE_SESSION_TURNS", "6")))
 LR_SCALE = float(os.environ.get("VAMPIRE_BRICK_LR_SCALE", "1.0"))
@@ -189,32 +226,79 @@ class BrickClusterEngine:
             return None, float("-inf")
         import brick_cluster_charlm as bcc
         gvar = self.cluster._global_var()
+        # 2026-10-29 FIX: same -inf-sentinel cold-start bug as BrickCluster.route() itself (see its
+        # own comment) -- this mirror copy had it too, which matters because THIS is the exact
+        # function _lucy_candidate uses to decide brick_matched for retrieval/generation. -inf made
+        # margin unconditionally +inf (always "matched") for every query until neg.n>=2; fixed to
+        # the same neutral 0.0 sentinel so an early query's reported match actually reflects fit.
         neg_ld = (self.cluster.neg.log_density(features, bcc.VAR_FLOOR_FRAC, gvar)
-                  if self.cluster.neg.n >= 2 else float("-inf"))
+                  if self.cluster.neg.n >= 2 else 0.0)
         margins = [pos.log_density(features, bcc.VAR_FLOOR_FRAC, gvar) - neg_ld
                    for pos in self.cluster.brick_pos]
         best_idx = int(np.argmax(margins))
         return best_idx, margins[best_idx]
 
-    def _lucy_candidate(self, prompt_text: str) -> tuple[str, str | None, bool]:
-        """Returns (candidate_text, error, brick_matched). brick_matched=True requires a REAL
-        positive margin (the same threshold route() uses to decide whether to spawn during
-        training), not merely "some brick exists" -- see _real_margin's docstring for the bug
-        this fixes."""
+    def _retrieve_taught_answer(self, idx: int, query_features) -> str | None:
+        """2026-10-29, "question the premise" fix (Jonathan): a single full-BPTT gradient step on
+        a fresh 40-dim brick measured WORSE than random (loss 10.4 vs ln(256)=5.54) -- a one-shot-
+        taught brick cannot be expected to GENERATE a fluent answer from its own weights, tested
+        directly (scattered_fact_ensemble_test.py, ensembling across replicated-training siblings
+        did not fix it either -- the problem is convergence, not idiosyncratic single-model noise).
+        The fix: don't generate at all for a brick that has verbatim taught text on file -- the
+        taught line already IS "User: <question>\\nLucy: <the donor's real answer>" (see
+        brickcluster_engine's own line_text construction), so retrieve the best-matching stored
+        line by the SAME tfidf-cosine measure already used for routing, and hand back its answer
+        half verbatim. Returns None (caller falls back to cluster.generate()) when this brick has
+        no stored lines -- true for any brick trained before this field existed, or one that only
+        ever got trained via a path other than learn_line()'s own bookkeeping."""
+        lines = self.cluster.brick_taught_lines[idx] if idx < len(self.cluster.brick_taught_lines) else []
+        if not lines:
+            return None
+        q_idx, q_val = query_features
+        best_sim, best_line = -1.0, None
+        for ln in lines:
+            l_idx, l_val = self.cluster.tfidf_sparse(ln.split("\nLucy:", 1)[0])
+            common = np.intersect1d(q_idx, l_idx, assume_unique=False)
+            if common.size == 0:
+                sim = 0.0
+            else:
+                q_map = dict(zip(q_idx.tolist(), q_val.tolist()))
+                l_map = dict(zip(l_idx.tolist(), l_val.tolist()))
+                sim = sum(q_map[k] * l_map[k] for k in common)   # both vectors already L2-
+            if sim > best_sim:                                    # normalized by tfidf_sparse,
+                best_sim, best_line = sim, ln                      # so this dot product IS cosine
+        if best_line is None or best_sim < RETRIEVAL_COSINE_FLOOR or "\nLucy:" not in best_line:
+            return None   # see RETRIEVAL_COSINE_FLOOR's own comment -- a weak match falls through
+            # to generate() rather than confidently returning someone else's unrelated fact.
+        return best_line.split("\nLucy:", 1)[1].strip()
+
+    def _lucy_candidate(self, prompt_text: str) -> tuple[str, str | None, bool, str | None]:
+        """Returns (candidate_text, error, brick_matched, candidate_source). brick_matched=True
+        requires a REAL positive margin (the same threshold route() uses to decide whether to
+        spawn during training), not merely "some brick exists" -- see _real_margin's docstring for
+        the bug this fixes. candidate_source distinguishes "retrieved" (the exact taught text,
+        verbatim, see _retrieve_taught_answer -- safe to hand straight to the user, it's real
+        donor-authored text) from "generated" (cluster.generate()'s own single-shot net output --
+        STILL the pre-existing, still-open generation-quality bug, can be garbled, NOT safe to
+        treat as equivalent to retrieval). 2026-10-29: this distinction is why
+        LUCY_SKIP_DONOR_WHEN_MATCHED can finally be safely enabled -- see its own comment."""
         seed_text = f"User: {prompt_text}\nLucy:"
         try:
             features = self.cluster.tfidf_sparse(seed_text)
             idx, margin = self._real_margin(features)
             if idx is None or margin <= 0.0:
-                return "", None, False
+                return "", None, False, None
+            retrieved = self._retrieve_taught_answer(idx, features)
+            if retrieved:
+                return retrieved, None, True, "retrieved"
             ids = LI.enc(seed_text)[-121:]
             if len(ids) < 3:
-                return "", None, False
+                return "", None, False, None
             raw = self.cluster.generate(ids, LI.ITOS, seed_text, n=96, temp=0.0)
             out = LI.bytes_to_text(raw)
-            return out.strip(), None, True
+            return out.strip(), None, True, "generated"
         except Exception as exc:
-            return "", f"{type(exc).__name__}: {exc}", False
+            return "", f"{type(exc).__name__}: {exc}", False, None
 
     def _reference(self, body: dict) -> dict:
         donor_url = body.get("vampire_donor_url", REFERENCE_URL)
@@ -253,26 +337,48 @@ class BrickClusterEngine:
                 break
         context_text = SessionContext.render(turns)
         full_prompt = context_text + prompt_text
-        candidate, candidate_error, brick_matched = self._lucy_candidate(full_prompt)
-        try:
-            response = self._reference(body)
-            source = "frozen_donor"
-        except (OSError, urllib.error.URLError, TimeoutError, ValueError, json.JSONDecodeError) as exc:
-            raise RuntimeError(f"Frozen donor request failed: {type(exc).__name__}: {exc}") from exc
-        try:
-            answer = response["choices"][0]["message"].get("content") or ""
-        except (KeyError, IndexError, TypeError) as exc:
-            raise RuntimeError("Donor returned no chat-completion answer") from exc
-        turns = turns + [{"role": "user", "text": prompt_text}]
-        if answer:
-            turns.append({"role": "donor", "text": answer})
-        state_path = SessionContext.save(session_id, turns)
-        experience = {"id": uuid.uuid4().hex, "session_id": session_id, "prompt": prompt_text,
-                      "donor_answer": answer, "source": REFERENCE_MODEL,
-                      "status": "untrusted_pending_human_or_judge",
-                      "checkpoint_sha256": self.checkpoint_sha256, "at_ns": time.time_ns()}
-        _append_jsonl(EXPERIENCE_LOG, experience)
-        response["model"] = "lucywest-brickcluster-donor-assisted"
+        candidate, candidate_error, brick_matched, candidate_source = self._lucy_candidate(full_prompt)
+        # 2026-10-29 FIX, now safely enabled: brick_matched was computed and reported
+        # (lucy_brick_matched_existing) but NEVER used to skip the donor call -- she asked the
+        # host on every single turn regardless of whether her own weights already had it,
+        # contradicting the actual design intent (Jonathan: "if it already has the answer in its
+        # own weight, it doesn't bother asking the host"). Gated on candidate_source == "retrieved"
+        # specifically, NOT just brick_matched+candidate -- a "generated" candidate is still the
+        # pre-existing single-brick generation-quality bug (can be garbled) and must still go to
+        # the donor; only a verbatim RETRIEVED answer (see _retrieve_taught_answer, gated by its
+        # own RETRIEVAL_COSINE_FLOOR) is safe to hand back without asking the host.
+        if LUCY_SKIP_DONOR_WHEN_MATCHED and brick_matched and candidate and candidate_source == "retrieved":
+            source = "lucy_own_weights"
+            answer = candidate
+            turns = turns + [{"role": "user", "text": prompt_text}, {"role": "lucy", "text": answer}]
+            state_path = SessionContext.save(session_id, turns)
+            response = {"id": uuid.uuid4().hex, "object": "chat.completion",
+                        "choices": [{"index": 0, "finish_reason": "stop",
+                                     "message": {"role": "assistant", "content": answer}}]}
+            experience_id, requires_acceptance = None, False
+        else:
+            try:
+                response = self._reference(body)
+                source = "frozen_donor"
+            except (OSError, urllib.error.URLError, TimeoutError, ValueError,
+                     json.JSONDecodeError) as exc:
+                raise RuntimeError(f"Frozen donor request failed: {type(exc).__name__}: {exc}") from exc
+            try:
+                answer = response["choices"][0]["message"].get("content") or ""
+            except (KeyError, IndexError, TypeError) as exc:
+                raise RuntimeError("Donor returned no chat-completion answer") from exc
+            turns = turns + [{"role": "user", "text": prompt_text}]
+            if answer:
+                turns.append({"role": "donor", "text": answer})
+            state_path = SessionContext.save(session_id, turns)
+            experience = {"id": uuid.uuid4().hex, "session_id": session_id, "prompt": prompt_text,
+                          "donor_answer": answer, "source": REFERENCE_MODEL,
+                          "status": "untrusted_pending_human_or_judge",
+                          "checkpoint_sha256": self.checkpoint_sha256, "at_ns": time.time_ns()}
+            _append_jsonl(EXPERIENCE_LOG, experience)
+            experience_id, requires_acceptance = experience["id"], True
+        response["model"] = ("lucywest-brickcluster-own-weights" if source == "lucy_own_weights"
+                              else "lucywest-brickcluster-donor-assisted")
         response["vampire_route"] = {
             "source": source, "architecture": LI.ARCH,
             "architecture_family": "wampyr_quinary_gated_rnn_brickcluster",
@@ -283,9 +389,10 @@ class BrickClusterEngine:
             "session_memory_kind": "explicit_rolling_text_buffer_not_recurrent_state",
             "lucy_own_weights_checked_before_donor": True, "lucy_brick_matched_existing": brick_matched,
             "lucy_candidate": candidate, "lucy_candidate_error": candidate_error,
-            "donor_answer_is_not_lucy_generation": True,
+            "lucy_candidate_source": candidate_source,
+            "donor_answer_is_not_lucy_generation": source == "frozen_donor",
             "state_file": str(state_path), "donor_model": REFERENCE_MODEL,
-            "experience_id": experience["id"], "experience_requires_acceptance": True,
+            "experience_id": experience_id, "experience_requires_acceptance": requires_acceptance,
         }
         return response
 

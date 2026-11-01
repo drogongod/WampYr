@@ -9,7 +9,18 @@ import uuid
 
 ROOT = Path(__file__).resolve().parent
 EXE = Path(r'H:\models\LucyWest\llamacpp_prismml\build\bin\Release\llama-server.exe')
-MODEL = Path(r'H:\models\LucyWest\Ternary-Bonsai-2-27B-Abliterated-PTQ1_0.gguf')
+# 2026-10-29, swapped from Ternary-Bonsai-2-27B-Abliterated-PTQ1_0.gguf to Ornith-1.5-9B-uncensored
+# (Jonathan: "shown to be more reliable, less hallucinations"). Concrete, measured reason to trust
+# that call, not just taking it on faith: the 27B model burned its ENTIRE completion budget on
+# reasoning_content TWICE the same night, both times returning empty final `content`
+# (finish_reason="length") for an ordinary factual question -- a real reliability failure, not a
+# one-off. Q8_0 chosen over the smaller Q4_K_M variant also on disk, since the explicit goal here is
+# reliability/fidelity, not speed; -c 8192 matches Ornith's own Modelfile's num_ctx=8192, not just
+# copied from the old model by accident. Alias kept as "vampire-lucywest" on purpose -- see
+# REFERENCE_MODEL in brickcluster_engine.py and ensure_server()'s own health check below, which
+# validates by ALIAS (the donor ROLE), not by which underlying .gguf backs it; changing the alias
+# would require also updating brickcluster_engine.py in lockstep for no real benefit.
+MODEL = Path(r'F:\LLM\Ornith-1.5-9B-uncensored-GGUF\Ornith-1.5-9B-uncensored.Q8_0.gguf')
 URL = 'http://127.0.0.1:8102'
 
 def ready():
