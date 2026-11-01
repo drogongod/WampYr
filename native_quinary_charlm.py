@@ -328,6 +328,12 @@ class NativeQuinaryCharLM:
     # fact. Neither wired in here -- see
     # lucy_west_galloping_multifact_curriculum_negative_20261101.md in project memory (corrects
     # lucy_west_galloping_candidate_selection_result_20261101.md).
+    # COHERENT vs UNRELATED content, same day: the 8-fact test's forgetting is a capacity-
+    # allocation problem (unrelated facts, no router, one brick), not a representation defect --
+    # a single COHERENT growing passage (one subject, correction appended not substituted) showed
+    # NO catastrophic NLL jumps across 6 stages. Whether the correction actually surfaces in
+    # generation is still open -- that run was deliberately budget-capped and never reached a
+    # fluent floor, see lucy_west_coherent_growth_correction_inconclusive_20261101.md.
     def _residual_update_level(self, name, level, grad):
         """Residual-carry update for a quinary-LEVEL weight. Returns the new int8 level array.
         BOTH stages (momentum AND the level-threshold step) now use integer residual-carry --

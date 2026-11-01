@@ -51,7 +51,12 @@ class FixedStepBrick(NativeQuinaryCharLM):
     facts x 4 reps -- see lucy_west_galloping_multifact_curriculum_negative_20261101.md, which
     corrects lucy_west_galloping_candidate_selection_result_20261101.md's generalization claim.
     As of 2026-11-01, no cheaper-than-brute-force candidate selection survives more than one fact.
-    Neither method is wired in. The
+    Neither method is wired in. Separately: the 8-fact test's catastrophic forgetting is NOT a
+    representation defect -- a COHERENT growing passage (one subject, correction appended not
+    substituted) showed no catastrophic NLL jumps across 6 stages, unlike the unrelated-facts case.
+    Whether the appended correction actually surfaces in generation is still open (that specific
+    run was deliberately budget-capped, never reached a fluent floor) -- see
+    lucy_west_coherent_growth_correction_inconclusive_20261101.md. The
     weight representation and this class's own update rule were never the problem; committing
     every proposed flip in one call simultaneously was ("flip-avalanche," quantitatively confirmed
     in discrete_endpoint_audit.py). That fix is NOT wired into this class's own

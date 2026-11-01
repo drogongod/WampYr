@@ -178,3 +178,28 @@ yet been found that beats brute-force one-at-a-time validated-subset selection o
 brick's very first exposure ever.** Full numbers:
 `lucy_west_galloping_multifact_curriculum_negative_20261101.md` in project memory (corrects
 `lucy_west_galloping_candidate_selection_result_20261101.md`'s closing argument).
+
+## FOLLOW-UP 2026-11-01, same day: coherent vs. unrelated content -- the actual explanation for the catastrophic forgetting above
+
+The 8-country test above forced UNRELATED facts into one brick with no router -- a known, expected
+failure mode (`BrickCluster.route()` exists specifically to send different facts to different,
+similarity-matched bricks so this never happens in production). Tested directly whether COHERENT,
+thematically-related cumulative content (one growing passage about a single subject, extended stage
+by stage, a correction appended at the end rather than anything deleted) avoids that destructive
+interference (`staggered_flip_test_v6_coherent_growth.py`).
+
+**Positive result: no catastrophic NLL jumps, ever**, across 6 stages growing a passage from 30 to
+240+ characters -- every stage transition bumped mildly then recovered within that same stage,
+never spiking the way unrelated facts did (there, individual facts jumped from ~1-2 nats to 6-9
+nats once later unrelated content was layered on). NLL stayed in a tight 2.4-4.2 nat band the whole
+way, trending mildly down overall.
+
+**Inconclusive on the sharpest question** (does an appended correction -- "English muffins are not
+actually English" -- actually show up in generation, or get drowned out): greedy generation was
+garbage at every single stage, including the very first and simplest one alone. Not evidence against
+the hypothesis -- this run was deliberately budget-capped (1500 candidates/call, 4 reps/stage) for
+wall-clock reasons, well short of the uncapped-budget/30-40-rep regime the single-fact breakthrough
+needed to cross from garbage into literal correct generation. Final NLL 2.59 nats is more than an
+order of magnitude above the ~0.002-0.16 nat floor that correlated with actual fluent output there.
+Needs a rerun at the resourcing level that worked before this specific question is settled. Full
+numbers: `lucy_west_coherent_growth_correction_inconclusive_20261101.md` in project memory.
