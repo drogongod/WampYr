@@ -56,7 +56,12 @@ class FixedStepBrick(NativeQuinaryCharLM):
     substituted) showed no catastrophic NLL jumps across 6 stages, unlike the unrelated-facts case.
     Whether the appended correction actually surfaces in generation is still open (that specific
     run was deliberately budget-capped, never reached a fluent floor) -- see
-    lucy_west_coherent_growth_correction_inconclusive_20261101.md. The
+    lucy_west_coherent_growth_correction_inconclusive_20261101.md.
+    CONFIRMED positive via the REAL router (staggered_flip_test_v7_real_router.py, ONLY _spawn()
+    overridden -- route/learn_line/relay/consolidate untouched): the 8-fact forgetting above was
+    entirely a capacity-allocation artifact of bypassing routing. One-shot taught through the real
+    router, the same 8 facts auto-split into 3 bricks with NO catastrophic forgetting anywhere --
+    see lucy_west_real_router_prevents_collapse_20261101.md. The
     weight representation and this class's own update rule were never the problem; committing
     every proposed flip in one call simultaneously was ("flip-avalanche," quantitatively confirmed
     in discrete_endpoint_audit.py). That fix is NOT wired into this class's own

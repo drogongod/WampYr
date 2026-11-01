@@ -334,6 +334,12 @@ class NativeQuinaryCharLM:
     # NO catastrophic NLL jumps across 6 stages. Whether the correction actually surfaces in
     # generation is still open -- that run was deliberately budget-capped and never reached a
     # fluent floor, see lucy_west_coherent_growth_correction_inconclusive_20261101.md.
+    # CONFIRMED positive via the REAL BrickCluster.route()/learn_line() (unmodified -- only
+    # _spawn() swapped to produce validated-subset bricks): the 8-fact forgetting was entirely a
+    # capacity-allocation artifact of bypassing routing. One-shot taught through the real router,
+    # same 8 facts auto-split into 3 bricks, NO catastrophic forgetting anywhere (worst drift +1.08
+    # nats, nowhere near random baseline) -- see
+    # lucy_west_real_router_prevents_collapse_20261101.md.
     def _residual_update_level(self, name, level, grad):
         """Residual-carry update for a quinary-LEVEL weight. Returns the new int8 level array.
         BOTH stages (momentum AND the level-threshold step) now use integer residual-carry --

@@ -203,3 +203,32 @@ needed to cross from garbage into literal correct generation. Final NLL 2.59 nat
 order of magnitude above the ~0.002-0.16 nat floor that correlated with actual fluent output there.
 Needs a rerun at the resourcing level that worked before this specific question is settled. Full
 numbers: `lucy_west_coherent_growth_correction_inconclusive_20261101.md` in project memory.
+
+## FOLLOW-UP 2026-11-01, same day: the real router, unmodified -- confirms it was a capacity-allocation artifact all along
+
+Jonathan's direct pushback on the 8-country forgetting result: that test forced unrelated facts
+into one brick with `BrickCluster.route()` bypassed entirely, which is a known, designed-for
+failure mode -- the real question is whether the router has "enough resolution" (his
+alphabet/nations analogy: you don't need unbounded categories, just enough that similar content
+clusters together and different content gets isolated) to prevent this in actual use.
+
+Tested directly (`staggered_flip_test_v7_real_router.py`): a `BrickCluster` subclass with ONLY
+`_spawn()` overridden to produce validated-subset-capable bricks -- `route()`, `learn_line()`,
+relay, and consolidate are the real, unmodified production code. Also fixed a methodology mismatch
+a sanity check caught first: repeating the identical line 4+ times (this session's earlier stress-
+test convention) destabilizes the real router, because production normally filters an exact-
+duplicate line before it ever reaches `learn_line()` -- repeating it anyway shrinks that line's own
+TF-IDF features toward zero via rising document frequency, an artifact of testing an unsupported
+input shape, not a routing bug. Switched to true one-shot teaching (matching this project's actual
+north star: "single exposure is the target, not forty repeated presentations").
+
+**Result: the same 8 country/capital facts split into only 3 bricks (6 shared one brick, 2 got
+their own) with NO catastrophic forgetting anywhere.** The shared brick's worst drift was +1.08
+nats (Egypt) -- nowhere near random baseline (5.545), let alone past it; two facts (France, Italy)
+actually IMPROVED after more facts were layered on top. The two isolated-brick facts retained
+perfectly, bit-for-bit. Confirms directly: the 8-country test's catastrophic forgetting was a
+capacity-allocation artifact from bypassing the router, not a flaw in the validated-subset fix
+itself. Honest nuance: which specific facts got split looks somewhat noisy/order-dependent, not
+cleanly semantic -- but the mechanism tolerated that noise without collapsing either way, which is
+a more robust property than requiring perfect categorization. Full numbers:
+`lucy_west_real_router_prevents_collapse_20261101.md` in project memory.
