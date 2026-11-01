@@ -307,3 +307,32 @@ existing BIAS_CORROB_REUSE_THRESHOLD=3 "don't trust low-evidence signal yet" pre
 cluster-level IDF gate. Needs a real large-scale trace to test. Not yet wired into production,
 decision pending. Full numbers: `lucy_west_cross_category_fix_candidates_tested_20261101.md` in
 project memory.
+
+## ⛔ NORTH STAR CORRECTION 2026-11-01, same day: the whole "cross-category" framing above was wrong
+
+Jonathan's direct correction: **LucyWEST's router organizes by MATHEMATICAL signature similarity,
+never by subject matter.** `BrickCluster.route()` does not need to know whether content is
+geography or biography -- it compares numerical feature vectors and routes by affinity.
+**Two sufficiently similar signatures sharing a brick is intentional, a feature, not a defect.**
+Approximate organization (occasional "misplaced pages") is explicitly acceptable -- 99.9%
+human-topic-correct placement is NOT a mandatory bar. Do not add subject classifiers, semantic
+category gates, or topic labels as a routing condition -- that would be a real departure from the
+actual architecture, not a fix.
+
+**This directly overturns the framing of the three sections immediately above.** "Jonathan's
+passage shared Brazil's brick despite being a different topic" was never actually a problem by this
+project's real objective. Re-examining the SAME data through the corrected lens (stability/
+interference, never topic purity): Brazil's post-share NLL (7.18 nats) was actually BETTER than
+isolated, completely untouched Germany's (7.89 nats) -- the data never showed sharing causing worse
+outcomes than not sharing. The "force-spawn while n_docs<IDF_MIN_DOCS" fix candidate is very likely
+NOT the right move to ship, now that the thing it was built to prevent (topically-mismatched
+merging) is understood not to be a real target -- it would trade away genuine mathematical
+self-organization/compression specifically to chase topic purity that was never the goal.
+
+**What remains legitimate, unchanged:** the underlying engineering findings -- unreliable
+small-sample IDF estimates, unusually permissive singleton variance at n=1, Gaussian acceptance
+calibration -- are still real and still worth fixing. Any fix to those must preserve mathematical
+organization, evaluated by learning stability/interference/retention/recoverability, never by
+whether a human agrees with the apparent topic grouping. Full text and the corrected evaluation
+criteria: `lucy_west_mathematical_memory_ecology_north_star_20261101.md` in project memory --
+read this before touching `BrickCluster.route()` again.

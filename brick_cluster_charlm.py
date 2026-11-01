@@ -400,6 +400,20 @@ IDF_SMOOTHING = 1.0
 # inside an already-mature cluster (cluster n_docs>=20, new brick's own n=1) -- the floor formula
 # only looks at the brick's own n, not n_docs, so this is untested, not ruled out. See
 # lucy_west_cross_category_fix_candidates_tested_20261101.md for the full real numbers.
+# ⛔ 2026-11-01, NORTH STAR CORRECTION, same day: the premise above ("two unlike bricks must not
+# share") was WRONG. This router organizes by MATHEMATICAL signature similarity, never by subject
+# matter -- route() doesn't need to know a line is about geography vs. biography, and two
+# sufficiently similar signatures sharing a brick is INTENTIONAL, not a defect, even when a human
+# would call their topics unrelated. Re-examined under the real evaluation axis (learning
+# stability/interference, never topic purity): the shared brick's post-teach NLL (7.18 nats) was
+# actually BETTER than an isolated, untouched brick's (7.89 nats) -- the data never showed sharing
+# causing worse outcomes than not sharing. The force-spawn-during-cold-start fix above is very
+# likely NOT the right thing to ship now -- it would trade away real mathematical self-organization
+# to chase a topic-purity goal that was never the actual objective. The underlying engineering
+# findings (unreliable small-sample IDF, permissive n=1 variance floor, Gaussian calibration)
+# remain real and worth fixing -- any fix must preserve mathematical organization, evaluated by
+# stability/retention, not by whether a human agrees with the apparent grouping. See
+# lucy_west_mathematical_memory_ecology_north_star_20261101.md -- read before touching route() again.
 
 # 🔧 2026-10-09, Jonathan: "tighten merging for efficiency" -- measured result (30-pass, 500KB
 # corpus): growth+consolidate SETTLES cleanly (105-106 bricks, stable from round 5 through round 30,
