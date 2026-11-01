@@ -232,3 +232,27 @@ itself. Honest nuance: which specific facts got split looks somewhat noisy/order
 cleanly semantic -- but the mechanism tolerated that noise without collapsing either way, which is
 a more robust property than requiring perfect categorization. Full numbers:
 `lucy_west_real_router_prevents_collapse_20261101.md` in project memory.
+
+## FOLLOW-UP 2026-11-01, same day: cross-category probe is MIXED, not a confirmation
+
+Jonathan's own caveat going in: the Jonathan/breakfast passage "was a quick example of principle, I
+don't know if it's actually the best to use to represent a bit-level model." Correct to flag --
+the test below is asymmetric (8 short repeated-template Q&A facts vs. one growing narrative), a
+noisy probe, not a clean controlled one.
+
+Extended the real-router test (`staggered_flip_test_v8_cross_category.py`): same 8 capital facts,
+same real `BrickCluster`, same cluster instance -- then taught the 6-stage growing Jonathan passage
+through it afterward, one-shot per stage, no reset. **Result: the Jonathan content did NOT spawn a
+new brick.** All 6 stages routed into brick 2, the SAME brick Brazil already occupied (brick
+assignment from phase 1 was unchanged: brick 0 = France/Italy/Spain/Japan/Egypt/Canada, brick 1 =
+Germany alone, brick 2 = Brazil alone).
+
+Retention: Brazil's NLL after the Jonathan teaching = 7.18 nats, second-worst of all 9 items
+checked -- but Germany (isolated, untouched by anything) is WORSE at 7.89, so this run cannot
+cleanly attribute Brazil's number to interference from Jonathan versus ordinary weak one-shot
+retention in a thin/isolated brick. No mid-run checkpoint was taken (Brazil's NLL right after
+phase 1, before Jonathan), so cause is unresolved either way. This is a more mixed result than the
+first real-router test, not a repeat confirmation of it -- the router grouped a genuinely different
+subject into an existing brick rather than carving out new territory, suggesting its TF-IDF/trigram
+similarity may track structural/surface overlap more than semantic topic. Full numbers:
+`lucy_west_cross_category_router_shares_brick_20261101.md` in project memory.

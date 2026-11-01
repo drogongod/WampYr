@@ -340,6 +340,12 @@ class NativeQuinaryCharLM:
     # same 8 facts auto-split into 3 bricks, NO catastrophic forgetting anywhere (worst drift +1.08
     # nats, nowhere near random baseline) -- see
     # lucy_west_real_router_prevents_collapse_20261101.md.
+    # CROSS-CATEGORY follow-up, same day: added a second, genuinely different-subject category
+    # (a growing narrative passage, not a fact Q&A) through the same real router. It did NOT
+    # spawn its own brick -- all 6 stages landed in the brick an existing unrelated fact already
+    # occupied. Can't cleanly tell whether that caused real interference (the shared-brick fact's
+    # retention NLL was bad, but an isolated untouched fact's NLL was just as bad on its own) --
+    # see lucy_west_cross_category_router_shares_brick_20261101.md. MIXED, not a repeat confirm.
     def _residual_update_level(self, name, level, grad):
         """Residual-carry update for a quinary-LEVEL weight. Returns the new int8 level array.
         BOTH stages (momentum AND the level-threshold step) now use integer residual-carry --

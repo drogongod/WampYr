@@ -61,7 +61,15 @@ class FixedStepBrick(NativeQuinaryCharLM):
     overridden -- route/learn_line/relay/consolidate untouched): the 8-fact forgetting above was
     entirely a capacity-allocation artifact of bypassing routing. One-shot taught through the real
     router, the same 8 facts auto-split into 3 bricks with NO catastrophic forgetting anywhere --
-    see lucy_west_real_router_prevents_collapse_20261101.md. The
+    see lucy_west_real_router_prevents_collapse_20261101.md.
+    CROSS-CATEGORY follow-up, same day (staggered_flip_test_v8_cross_category.py): added a second,
+    genuinely different-subject category (growing narrative, not fact Q&A) through the same real
+    router -- it did NOT spawn its own brick, landing instead in a brick an unrelated fact already
+    occupied. Interference on that shared fact is unresolved (its retention NLL was bad, but an
+    isolated untouched fact's NLL was just as bad with zero possible interference) -- see
+    lucy_west_cross_category_router_shares_brick_20261101.md. MIXED result, not a repeat confirm
+    that the router's category resolution is "enough" -- it may be tracking surface/structural
+    similarity more than topic. The
     weight representation and this class's own update rule were never the problem; committing
     every proposed flip in one call simultaneously was ("flip-avalanche," quantitatively confirmed
     in discrete_endpoint_audit.py). That fix is NOT wired into this class's own
