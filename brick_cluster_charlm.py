@@ -44,8 +44,14 @@ class FixedStepBrick(NativeQuinaryCharLM):
     CHEAPER SELECTION (staggered_flip_test_v4.py): top-down bisection is a NEGATIVE result
     (unbounded-bad, 3.2x MORE total passes than brute force once failures get common); galloping/
     doubling search (grow batch only on success, snap to 1 on failure) is BOUNDED (plateaus 0.7-
-    0.8x overhead, matching quality) and a large real win in the first few reps (65.9x/3.2x/2.2x/
-    1.2x) -- see lucy_west_galloping_candidate_selection_result_20261101.md. Neither wired in. The
+    0.8x overhead) with a large speedup in the first few reps (65.9x/3.2x/2.2x/1.2x) -- BUT a real
+    8-fact curriculum test (staggered_flip_test_v5_multifact.py) found that speedup is a ONE-TIME
+    cold-start effect, not per-fact: every fact after the brick's first ever ran galloping at
+    0.4-0.8x (MORE expensive than ground truth) with WORSE quality too, overall 0.7x across 8
+    facts x 4 reps -- see lucy_west_galloping_multifact_curriculum_negative_20261101.md, which
+    corrects lucy_west_galloping_candidate_selection_result_20261101.md's generalization claim.
+    As of 2026-11-01, no cheaper-than-brute-force candidate selection survives more than one fact.
+    Neither method is wired in. The
     weight representation and this class's own update rule were never the problem; committing
     every proposed flip in one call simultaneously was ("flip-avalanche," quantitatively confirmed
     in discrete_endpoint_audit.py). That fix is NOT wired into this class's own

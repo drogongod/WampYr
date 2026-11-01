@@ -319,10 +319,15 @@ class NativeQuinaryCharLM:
     # whole ranges, shrink on failure) is a NEGATIVE result -- unbounded-bad, 3.2x MORE total
     # forward passes than brute force once failures get common. Galloping/doubling search (grow
     # batch size only after success, snap to 1 on failure) is BOUNDED -- plateaus at 0.7-0.8x
-    # overhead instead of spiraling, matching quality -- and is a large real win specifically in
-    # the first few reps (65.9x/3.2x/2.2x/1.2x), the regime a real multi-fact curriculum mostly
-    # lives in. Neither wired in here yet -- see
-    # lucy_west_galloping_candidate_selection_result_20261101.md in project memory.
+    # overhead instead of spiraling -- and showed a large speedup in the first few reps
+    # (65.9x/3.2x/2.2x/1.2x) of a SINGLE fact. CORRECTED same day by a real 8-fact curriculum test
+    # (staggered_flip_test_v5_multifact.py): that speedup is a one-time cold-start effect from the
+    # brick's blank init, not a per-fact one -- every fact after the first ran galloping at
+    # 0.4-0.8x (MORE expensive than ground truth) with WORSE quality, overall 0.7x across 8 facts
+    # x 4 reps. As of now no cheaper-than-brute-force candidate selection survives more than one
+    # fact. Neither wired in here -- see
+    # lucy_west_galloping_multifact_curriculum_negative_20261101.md in project memory (corrects
+    # lucy_west_galloping_candidate_selection_result_20261101.md).
     def _residual_update_level(self, name, level, grad):
         """Residual-carry update for a quinary-LEVEL weight. Returns the new int8 level array.
         BOTH stages (momentum AND the level-threshold step) now use integer residual-carry --

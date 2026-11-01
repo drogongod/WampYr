@@ -147,3 +147,34 @@ as the price of exactness) before this is affordable at scale.
 (flip-avalanche) is solved and verified with zero float shadow weight. The cost question has a
 real, bounded, partial answer (galloping) but not a final one -- the next real step is testing it
 against an actual multi-fact curriculum once one exists, not further single-fact tuning.
+
+## CORRECTION 2026-11-01, same day: the multi-fact test ran, and galloping does NOT win on it
+
+Built that multi-fact curriculum test immediately (`staggered_flip_test_v5_multifact.py`, same
+directory) -- 8 distinct facts (country/capital pairs), 4 reps each, block curriculum, one brick.
+**Result: the "galloping wins the real-curriculum regime" hypothesis is FALSE.** Only the very
+first fact ever taught to a blank brick (France) showed galloping's big speedup (65.9x/3.2x/2.2x/
+1.2x, matching the earlier single-fact benchmark exactly). Every fact taught after that ran
+galloping at 0.4-0.8x -- MORE expensive than ground truth, not less -- with measurably worse
+quality too (by the Canada fact, galloping's NLL was stuck at 6.8-9.2 nats of garbage while ground
+truth cleanly reached 0.8-1.2 nats). Overall across all 8 facts x 4 reps: ground=179,694 forward
+passes, gallop=252,095, speedup=0.7x -- worse than even the single-fact stress test's 0.8x.
+
+**Mechanistic read:** galloping's early win depends on the brick being near its blank random
+initialization, where most proposed flips are obviously correct and large batches succeed easily.
+A real curriculum only provides that blank state ONCE, before the first fact ever -- not once per
+new fact. Once any prior learning exists, newly proposed flips interact with already-meaningful
+weights in ways that are no longer obviously net-beneficial in large groups, so galloping's
+batches fail more and its cost reverts to (here, past) brute force.
+
+**Separately, both policies showed near-total catastrophic forgetting of earlier facts** in a
+post-curriculum retention check -- expected, not a candidate-selection artifact: this test used
+ONE brick for all 8 unrelated facts, which is not how production works (`BrickCluster.route()`
+exists specifically to send different facts to different bricks). Read as confirming why that
+routing layer is load-bearing, not as new evidence against the core fix.
+
+**Honest state of the cost question as of this update: no cheaper candidate-selection method has
+yet been found that beats brute-force one-at-a-time validated-subset selection on anything but a
+brick's very first exposure ever.** Full numbers:
+`lucy_west_galloping_multifact_curriculum_negative_20261101.md` in project memory (corrects
+`lucy_west_galloping_candidate_selection_result_20261101.md`'s closing argument).
