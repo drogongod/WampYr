@@ -256,3 +256,26 @@ first real-router test, not a repeat confirmation of it -- the router grouped a 
 subject into an existing brick rather than carving out new territory, suggesting its TF-IDF/trigram
 similarity may track structural/surface overlap more than semantic topic. Full numbers:
 `lucy_west_cross_category_router_shares_brick_20261101.md` in project memory.
+
+## FOLLOW-UP 2026-11-01, same day: confirmed WHY, with real margins printed
+
+Reconstructed cluster state right before Jonathan stage 1 was taught and printed `route()`'s
+actual per-brick margins. Two real mechanisms, both already in the code, neither a bug:
+
+1. `n_docs=8` after phase 1, `IDF_MIN_DOCS=20` -- TF-IDF weighting NEVER activated anywhere in
+   this test (max 13 docs ever seen). Every feature vector was raw trigram counts the whole time,
+   exactly the regime the module's own 2026-10-09 comment already warned about (unrelated real
+   English prose measuring ~0.965 cosine-similar on raw counts).
+2. The established 6-fact brick actually REJECTED Jonathan's content outright (margin=-0.0217,
+   below the strict `>0` bar) -- it was never "merged" there. The winner was a singleton brick
+   (Brazil, margin=0.1048, beating Germany's 0.0102) because `_OnlineGaussian`'s adaptive variance
+   floor deliberately widens to full background width at n=1 ("don't reject on this basis before
+   you have evidence") -- making a freshly-spawned singleton the MOST lenient brick in the cluster,
+   by design, regardless of its content. Brazil beat Germany only by incidental raw-vector
+   proximity to Jonathan's text, not semantic signal.
+
+Conclusion: this isn't a router failure, it's two real safeguards (IDF, variance-floor tightening)
+never getting enough data (only 14 lines total) to engage. The "enough resolution" question remains
+untested at adequate scale (~20+ real lines, content actually merging into experienced bricks, not
+freshly-spawned singletons) by either real-router run so far. Full numbers:
+`lucy_west_cross_category_why_shared_brick_mechanism_20261101.md` in project memory.

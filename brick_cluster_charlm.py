@@ -376,6 +376,15 @@ VAR_CEILING_MULT = 4.0
 # estimate of how "common" it really is); IDF_SMOOTHING is the standard +1 Laplace term.
 IDF_MIN_DOCS = 20
 IDF_SMOOTHING = 1.0
+# 🎯 2026-11-01, real cross-category test confirmed this threshold mattering directly: a 14-line
+# test (lucy_west_cross_category_why_shared_brick_mechanism_20261101.md) never reached n_docs=20,
+# so IDF weighting was OFF for its entire duration, and a growing narrative passage landed in an
+# unrelated singleton brick (margin -0.0217 on the real 6-fact brick -- genuinely rejected there,
+# margin +0.1048 on a freshly-spawned n=1 brick, which the adaptive variance floor below makes the
+# most lenient brick in the cluster by construction). Not a router bug: real safeguards (this IDF
+# gate, and the floor narrowing with n) simply never got enough data to engage at this scale.
+# Testing the real category-resolution question needs >=20 real lines merging into EXPERIENCED
+# bricks, not a handful of lines mostly landing in freshly-spawned singletons.
 
 # 🔧 2026-10-09, Jonathan: "tighten merging for efficiency" -- measured result (30-pass, 500KB
 # corpus): growth+consolidate SETTLES cleanly (105-106 bricks, stable from round 5 through round 30,
