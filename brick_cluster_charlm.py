@@ -385,6 +385,21 @@ IDF_SMOOTHING = 1.0
 # gate, and the floor narrowing with n) simply never got enough data to engage at this scale.
 # Testing the real category-resolution question needs >=20 real lines merging into EXPERIENCED
 # bricks, not a handful of lines mostly landing in freshly-spawned singletons.
+# 🔧 2026-11-01, four candidate fixes for the above tested against the real trace (Jonathan's ask:
+# "make certain two unlike bricks do not occupy the same brick when all else is even"). Raising the
+# route() spawn-margin bar is FALSIFIED: legitimate merges (margin as low as 0.0008) are as thin as
+# or thinner than the spurious one (0.0237-0.1048) -- no threshold separates them. Lowering
+# IDF_MIN_DOCS is FALSIFIED, makes it WORSE (<=2 collapses everything into one brick -- IDF from
+# too few docs is itself unreliable). A lexical-overlap check against brick_taught_lines also fails
+# -- legitimate merges share zero content words with each other, only the template. The one real
+# working fix found: force _spawn() unconditionally while self.n_docs < IDF_MIN_DOCS (defer ALL
+# merging until IDF is trustworthy) -- zero cross-category sharing, confirmed, at the cost of zero
+# merging in that same window; bounded to a one-time bootstrap tax in production (4.2MB corpus
+# clears n_docs>=20 almost immediately). NOT YET WIRED IN: open question whether the SAME n=1
+# variance-floor leniency (mean_var above) re-creates this failure for any freshly-spawned brick
+# inside an already-mature cluster (cluster n_docs>=20, new brick's own n=1) -- the floor formula
+# only looks at the brick's own n, not n_docs, so this is untested, not ruled out. See
+# lucy_west_cross_category_fix_candidates_tested_20261101.md for the full real numbers.
 
 # 🔧 2026-10-09, Jonathan: "tighten merging for efficiency" -- measured result (30-pass, 500KB
 # corpus): growth+consolidate SETTLES cleanly (105-106 bricks, stable from round 5 through round 30,

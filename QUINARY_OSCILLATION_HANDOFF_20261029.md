@@ -279,3 +279,31 @@ never getting enough data (only 14 lines total) to engage. The "enough resolutio
 untested at adequate scale (~20+ real lines, content actually merging into experienced bricks, not
 freshly-spawned singletons) by either real-router run so far. Full numbers:
 `lucy_west_cross_category_why_shared_brick_mechanism_20261101.md` in project memory.
+
+## FOLLOW-UP 2026-11-01, same day: three candidate fixes tested, two falsified, one works with a tradeoff
+
+Jonathan's ask: "we still need a way to make certain two unlike bricks do not occupy the same
+brick when all else is even." Four candidates tested against the real routing trace:
+
+- Raise the spawn-margin bar above 0 -- FALSIFIED. Legitimate capital-fact merges (margins as low
+  as 0.0008-0.0050) are as thin as, or thinner than, the spurious Jonathan-into-Brazil merges
+  (0.0237-0.1048). No threshold separates the two; the spurious ones are often the LARGER margins.
+- Lower IDF_MIN_DOCS so IDF engages sooner -- FALSIFIED, makes it worse. At IDF_MIN_DOCS<=2, every
+  capital fact AND every Jonathan stage collapse into one brick -- IDF from too few real documents
+  is itself too noisy, exactly what the existing comment on this constant already warned about.
+- Lexical-overlap backstop against `brick_taught_lines` -- doesn't discriminate either: legitimate
+  merges share ZERO content words with each other, only the template.
+- Force-spawn unconditionally while `n_docs < IDF_MIN_DOCS` -- WORKS, real tradeoff. Confirmed:
+  zero cross-category sharing (14/14 facts spawn separately during cold start). Cost: nothing
+  merges during that window either, including facts that plausibly should share a brick. Bounded
+  in production (4.2MB corpus clears n_docs>=20 almost immediately) -- a one-time bootstrap tax.
+
+**Open question, not yet tested:** does the SAME n=1 variance-floor leniency re-create this failure
+for a freshly-spawned brick inside an already-mature, IDF-active cluster (cluster n_docs>=20, but
+the new brick's own n=1)? The floor formula only looks at the brick's own n, not the cluster's
+n_docs, so this is plausible and unresolved. If cold-start-only, the force-spawn gate is a complete
+fix; if not, the real fix lives in `_OnlineGaussian`'s variance floor itself (analogous to the
+existing BIAS_CORROB_REUSE_THRESHOLD=3 "don't trust low-evidence signal yet" precedent), not the
+cluster-level IDF gate. Needs a real large-scale trace to test. Not yet wired into production,
+decision pending. Full numbers: `lucy_west_cross_category_fix_candidates_tested_20261101.md` in
+project memory.
