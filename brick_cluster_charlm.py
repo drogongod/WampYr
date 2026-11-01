@@ -414,6 +414,13 @@ IDF_SMOOTHING = 1.0
 # remain real and worth fixing -- any fix must preserve mathematical organization, evaluated by
 # stability/retention, not by whether a human agrees with the apparent grouping. See
 # lucy_west_mathematical_memory_ecology_north_star_20261101.md -- read before touching route() again.
+# 🎯 2026-11-01, RESOLVED: tested whether the n=1 leniency above persists past n_docs>=20 -- it does
+# NOT. At n_docs=30 (IDF genuinely active), a fresh n=1 singleton's margin test correctly separated
+# 5/5 real test lines by real IDF-weighted cosine distance (close: cosine 0.85/0.86 -> margin
+# +0.038/+0.042, accepted; far: cosine 0.04-0.14 -> margin -0.043 to -0.055, rejected), confirmed
+# against both a hand-picked singleton and an independently-arising one. The leniency bug is
+# COLD-START-SPECIFIC (IDF-inactive, <20 docs), not a standing flaw in this variance floor itself --
+# see lucy_west_singleton_leniency_coldstart_only_confirmed_20261101.md for the full real numbers.
 
 # 🔧 2026-10-09, Jonathan: "tighten merging for efficiency" -- measured result (30-pass, 500KB
 # corpus): growth+consolidate SETTLES cleanly (105-106 bricks, stable from round 5 through round 30,

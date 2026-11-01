@@ -336,3 +336,20 @@ organization, evaluated by learning stability/interference/retention/recoverabil
 whether a human agrees with the apparent topic grouping. Full text and the corrected evaluation
 criteria: `lucy_west_mathematical_memory_ecology_north_star_20261101.md` in project memory --
 read this before touching `BrickCluster.route()` again.
+
+## FOLLOW-UP 2026-11-01, same day: tested whether the n=1 leniency persists past n_docs>=20 -- it does NOT
+
+Fed ~30 diverse filler lines (real vocabulary variety, not one repeated template) so `n_docs=30`,
+comfortably clearing `IDF_MIN_DOCS=20`. Froze the cluster, spawned one fresh singleton brick (n=1),
+then computed REAL IDF-weighted cosine similarity between its one example and 5 test lines, and
+read `route()`'s real margins for each against that singleton AND an independently-arising
+singleton elsewhere in the same cluster.
+
+**Result: discrimination holds correctly at every point tested.** Close content (cosine 0.85, 0.86)
+got positive margins (+0.038, +0.042) and accepted; far content (cosine 0.04-0.14) got negative
+margins (-0.043 to -0.055) and correctly rejected -- for BOTH singletons tested, not just the
+hand-picked one. The n=1 variance-floor leniency that let Jonathan's passage merge spuriously was
+specific to the 14-line, IDF-inactive cold-start regime -- once IDF has real document-frequency
+stats to work with, even the most lenient possible acceptance test still discriminates correctly.
+No deeper per-brick leniency bug exists past the bootstrap window. Full numbers:
+`lucy_west_singleton_leniency_coldstart_only_confirmed_20261101.md` in project memory.
