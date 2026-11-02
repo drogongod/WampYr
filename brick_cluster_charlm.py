@@ -26,56 +26,61 @@ is that result, made continuously growable instead of a fixed one-shot K.
 import numpy as np
 from native_quinary_charlm import (
     NativeQuinaryCharLM, THRESHOLD, level_to_planes, simd_mm, activation_quant_int8, sig_stable,
+    EQ, MAX_EMB, EMB_DECAY_DIV, ACCUM_GRAD_CLIP, DH_CARRY_CLIP, BIAS_CEIL, BIAS_CORROB_ENABLED,
 )
+
+MATRICES = ["Win", "Wh", "Wgx", "Wgh", "Wo"]
 
 
 class FixedStepBrick(NativeQuinaryCharLM):
     """L1-normalize + fixed +-1-level-per-call step -- the best-tested single-brick config
     (native_quinary_debugging_arc.md), not the production file's current variable-step formula.
 
-    RESOLVED 2026-11-01: this exact class, unmodified, generates the LITERAL correct answer
-    ("The capital of France is Paris.", byte-for-byte, no float shadow weight anywhere) once its
-    flip-commit step is replaced by Astra's validated-subset mechanism (real-loss-checked
-    accept/reject per candidate flip, Wemb's flips included in the same ranked pool). Budget sets
-    speed/floor: N=1000 crosses into the exact sentence at rep 30 (floor ~0.16 nats); UNCAPPED
-    (full real candidate pool) crosses at rep 8, floor 0.002-0.004 nats by rep 20-40, no ceiling
-    found yet -- see staggered_flip_test.py/_v2.py/_v3.py in this directory and
-    lucy_west_validated_subset_exact_generation_breakthrough_20261101.md in project memory.
-    CHEAPER SELECTION (staggered_flip_test_v4.py): top-down bisection is a NEGATIVE result
-    (unbounded-bad, 3.2x MORE total passes than brute force once failures get common); galloping/
-    doubling search (grow batch only on success, snap to 1 on failure) is BOUNDED (plateaus 0.7-
-    0.8x overhead) with a large speedup in the first few reps (65.9x/3.2x/2.2x/1.2x) -- BUT a real
-    8-fact curriculum test (staggered_flip_test_v5_multifact.py) found that speedup is a ONE-TIME
-    cold-start effect, not per-fact: every fact after the brick's first ever ran galloping at
-    0.4-0.8x (MORE expensive than ground truth) with WORSE quality too, overall 0.7x across 8
-    facts x 4 reps -- see lucy_west_galloping_multifact_curriculum_negative_20261101.md, which
-    corrects lucy_west_galloping_candidate_selection_result_20261101.md's generalization claim.
-    As of 2026-11-01, no cheaper-than-brute-force candidate selection survives more than one fact.
-    Neither method is wired in. Separately: the 8-fact test's catastrophic forgetting is NOT a
-    representation defect -- a COHERENT growing passage (one subject, correction appended not
-    substituted) showed no catastrophic NLL jumps across 6 stages, unlike the unrelated-facts case.
-    Whether the appended correction actually surfaces in generation is still open (that specific
-    run was deliberately budget-capped, never reached a fluent floor) -- see
-    lucy_west_coherent_growth_correction_inconclusive_20261101.md.
-    CONFIRMED positive via the REAL router (staggered_flip_test_v7_real_router.py, ONLY _spawn()
-    overridden -- route/learn_line/relay/consolidate untouched): the 8-fact forgetting above was
-    entirely a capacity-allocation artifact of bypassing routing. One-shot taught through the real
-    router, the same 8 facts auto-split into 3 bricks with NO catastrophic forgetting anywhere --
-    see lucy_west_real_router_prevents_collapse_20261101.md.
-    CROSS-CATEGORY follow-up, same day (staggered_flip_test_v8_cross_category.py): added a second,
-    genuinely different-subject category (growing narrative, not fact Q&A) through the same real
-    router -- it did NOT spawn its own brick, landing instead in a brick an unrelated fact already
-    occupied. Interference on that shared fact is unresolved (its retention NLL was bad, but an
-    isolated untouched fact's NLL was just as bad with zero possible interference) -- see
-    lucy_west_cross_category_router_shares_brick_20261101.md. MIXED result, not a repeat confirm
-    that the router's category resolution is "enough" -- it may be tracking surface/structural
-    similarity more than topic. The
-    weight representation and this class's own update rule were never the problem; committing
-    every proposed flip in one call simultaneously was ("flip-avalanche," quantitatively confirmed
-    in discrete_endpoint_audit.py). That fix is NOT wired into this class's own
-    _residual_update_level below -- it lives in the separate StaggeredFlipBrick subclass in the
-    test scripts, pending a cheaper validated-candidate search before it's worth porting here."""
+    WIRED 2026-11-02: learn_batch below now commits flips via the validated-subset mechanism
+    (ranked-candidate real-loss-checked accept/reject, Wemb included in the same pool, uncapped
+    budget), ported from staggered_flip_test_v3.py's StaggeredFlipBrickV2(POLICY="validated_wemb").
+    Root cause this replaces: the inherited NativeQuinaryCharLM.learn_batch commits every proposed
+    flip from a single call simultaneously, measured to cost a +2 to +7 nat destructive interaction
+    between flips that are each individually correct ("flip-avalanche," discrete_endpoint_audit.py).
+    The test scripts validated this against one hardcoded fact string; this production version
+    generalizes that to THIS CALL's own real batch (whatever idxs_batch actually is) as the
+    validation signal -- the correct generalization, since every real training call already knows
+    exactly what it is teaching. Measured result on the original single-fact test: exact, byte-for-
+    byte correct generation ("The capital of France is Paris.") from rep 8 onward, floor 0.002-0.004
+    nats, with NO float shadow weight anywhere -- see
+    lucy_west_validated_subset_exact_generation_breakthrough_20261101.md.
+    CHEAPER SELECTION (staggered_flip_test_v4.py/_v5_multifact.py): top-down bisection is NEGATIVE
+    (unbounded-bad, 3.2x MORE total passes once failures get common); galloping/doubling search only
+    wins a brick's very first-ever fact, then runs 0.4-0.8x MORE expensive than brute force with
+    WORSE quality on every fact after -- see lucy_west_galloping_multifact_curriculum_negative_
+    20261101.md. As of 2026-11-02, uncapped brute-force validation (VALIDATED_TOP_N=None below) is
+    the only version that has actually been measured to work on more than one fact; this is a real,
+    accepted compute-cost tradeoff (one extra forward pass over this call's batch per real candidate
+    flip evaluated), not an oversight.
+    CONFIRMED positive via the REAL router (staggered_flip_test_v7_real_router.py): an earlier 8-fact
+    test's catastrophic forgetting was a capacity-allocation artifact of bypassing routing with one
+    forced brick, not a defect in this update rule -- through the real, unmodified
+    BrickCluster.route()/learn_line(), the same 8 facts auto-split into 3 bricks with NO catastrophic
+    forgetting anywhere -- see lucy_west_real_router_prevents_collapse_20261101.md.
+    CROSS-CATEGORY follow-up (staggered_flip_test_v8_cross_category.py): a second, different-subject
+    passage shared a brick with an unrelated fact instead of spawning its own. Confirmed cold-start-
+    only (corpus too small for IDF_MIN_DOCS to ever activate, not a standing router bug) -- see
+    lucy_west_cross_category_why_shared_brick_mechanism_20261101.md and
+    lucy_west_singleton_leniency_coldstart_only_confirmed_20261101.md. No change needed there; this
+    class's own job is strictly the update rule, which the router correction does not touch."""
+
+    VALIDATED_TOP_N = None  # None = uncapped (full real candidate pool each call) -- the only
+    # budget actually measured to reach exact correct generation at a real floor (rep 8, 0.002-0.004
+    # nats). Every capped budget tested (150/400/600/1000) was strictly worse and slower to
+    # converge, with no sign of diminishing returns yet found at the top end -- see
+    # lucy_west_validated_subset_exact_generation_breakthrough_20261101.md's "uncapped budget"
+    # section. Set to an int here only if real production compute cost forces a budget; as of
+    # 2026-11-02 that tradeoff has not been needed.
+
     def _residual_update_level(self, name, level, grad):
+        """Kept standalone (unused by learn_batch below, which commits validated-subset flips
+        itself) for any direct caller/diagnostic that still wants the plain fixed-step formula on
+        its own, e.g. a one-off repair script."""
         mom_int = self._integer_ema(name, grad)
         scaled = self._adaptive_normalize(name, mom_int)
         res = self._res.get(name, np.zeros_like(level, dtype=np.int64))
@@ -89,6 +94,182 @@ class FixedStepBrick(NativeQuinaryCharLM):
         self._total_consumed[name] = self._total_consumed.get(name, 0) + int((actual_step * THRESHOLD).sum())
         self._res[name] = res
         return new_level
+
+    def _batch_nll(self, idxs_arr):
+        """Real teacher-forced mean NLL over THIS call's actual batch, evaluated at self's CURRENT
+        (possibly mid-trial) weights. This is validated-subset's validation signal, generalized from
+        the test scripts' single hardcoded FACT string to whatever this call is really teaching --
+        every production training call already has exactly that information in idxs_batch."""
+        logits = self._forward_batch(idxs_arr.tolist())  # (B, T, V) at current weights
+        targets = idxs_arr[:, 1:]
+        lg = logits[:, :-1, :]
+        logp = lg - np.logaddexp.reduce(lg, axis=-1, keepdims=True)
+        b_idx = np.arange(targets.shape[0])[:, None]
+        t_idx = np.arange(targets.shape[1])[None, :]
+        nll = -logp[b_idx, t_idx, targets]
+        return float(nll.mean())
+
+    def learn_batch(self, idxs_batch, lr_scale=1.0, corrob_eligible=True):
+        self.consume_pending_relay()
+        B = len(idxs_batch); T = len(idxs_batch[0])
+        idxs_arr = np.array(idxs_batch, dtype=np.int64)
+        D = self.D
+
+        S1_in, S2_in = level_to_planes(self.Win); S1_h, S2_h = level_to_planes(self.Wh)
+        S1_gx, S2_gx = level_to_planes(self.Wgx); S1_gh, S2_gh = level_to_planes(self.Wgh)
+        S1_o, S2_o = level_to_planes(self.Wo)
+        S1_inT, S2_inT = level_to_planes(self.Win.T); S1_hT, S2_hT = level_to_planes(self.Wh.T)
+        S1_gxT, S2_gxT = level_to_planes(self.Wgx.T); S1_ghT, S2_ghT = level_to_planes(self.Wgh.T)
+        S1_oT, S2_oT = level_to_planes(self.Wo.T)
+
+        X = (self.Wemb[:, idxs_arr.T]).astype(np.float64) / EQ
+        h = np.zeros((D, B), np.float64)
+        H = []
+        logits = np.empty((T, self.V, B), np.float64)
+        for t in range(T):
+            x_t = X[:, t, :]
+            xq, xs = activation_quant_int8(x_t); hq, hs = activation_quant_int8(h)
+            pc = simd_mm(S1_in, S2_in, xq, xs) + simd_mm(S1_h, S2_h, hq, hs) + self.b[:, None]
+            c = np.tanh(pc)
+            pg = simd_mm(S1_gx, S2_gx, xq, xs) + simd_mm(S1_gh, S2_gh, hq, hs) + self.bg[:, None]
+            g = sig_stable(pg)
+            hn = g * c + (1 - g) * h
+            H.append((x_t, h, c, g, hn)); h = hn
+            hnq, hns = activation_quant_int8(hn)
+            logits[t] = simd_mm(S1_o, S2_o, hnq, hns)
+
+        gWemb = np.zeros_like(self.Wemb, dtype=np.float64)
+        gWin = np.zeros((D, D)); gWh = np.zeros((D, D)); gb = np.zeros(D)
+        gWgx = np.zeros((D, D)); gWgh = np.zeros((D, D)); gbg = np.zeros(D)
+        gWo = np.zeros((self.V, D))
+        dh = np.zeros((D, B)); loss = np.zeros(B); n = 0
+
+        for t in range(T - 2, -1, -1):
+            tgt = idxs_arr[:, t + 1]
+            lg = logits[t]
+            p = np.exp(lg - lg.max(axis=0, keepdims=True)); p /= p.sum(axis=0, keepdims=True)
+            loss += -np.log(p[tgt, np.arange(B)] + 1e-9); n += 1
+            dl = p.copy(); dl[tgt, np.arange(B)] -= 1.0
+            x_t, hp, c, g, hn = H[t]
+            gWo += dl @ hn.T
+            dlq, dls = activation_quant_int8(dl)
+            dh = np.clip(dh + simd_mm(S1_oT, S2_oT, dlq, dls), -DH_CARRY_CLIP, DH_CARRY_CLIP)
+            dg = dh * (c - hp); dc = dh * g; dhp = dh * (1 - g)
+            dpc = dc * (1 - c * c); dpg = dg * g * (1 - g)
+            gWin += dpc @ x_t.T; gWh += dpc @ hp.T; gb += dpc.sum(axis=1)
+            gWgx += dpg @ x_t.T; gWgh += dpg @ hp.T; gbg += dpg.sum(axis=1)
+            dpcq, dpcs = activation_quant_int8(dpc); dpgq, dpgs = activation_quant_int8(dpg)
+            dxemb = simd_mm(S1_inT, S2_inT, dpcq, dpcs) + simd_mm(S1_gxT, S2_gxT, dpgq, dpgs)
+            np.add.at(gWemb, (slice(None), idxs_arr[:, t]), dxemb)
+            dh = np.clip(dhp + simd_mm(S1_hT, S2_hT, dpcq, dpcs) + simd_mm(S1_ghT, S2_ghT, dpgq, dpgs),
+                         -DH_CARRY_CLIP, DH_CARRY_CLIP)
+
+        scale_int = lambda G: np.clip(np.round(G * lr_scale), -ACCUM_GRAD_CLIP, ACCUM_GRAD_CLIP).astype(np.int64)
+        grads = {"Win": gWin, "Wh": gWh, "Wgx": gWgx, "Wgh": gWgh, "Wo": gWo}
+
+        proposals = {}
+        for name in MATRICES:
+            level = getattr(self, name)
+            mom_int = self._integer_ema(name, scale_int(grads[name]))
+            scaled = self._adaptive_normalize(name, mom_int)
+            res_prev = self._res.get(name, np.zeros_like(level, dtype=np.int64))
+            res_new = res_prev + scaled
+            self._total_in[name] = self._total_in.get(name, 0) + int(scaled.sum())
+            step = np.where(np.abs(res_new) >= THRESHOLD, np.sign(res_new), 0)
+            proposals[name] = (level.copy(), res_new, step)
+
+        wemb_grad_int = scale_int(gWemb * EQ)
+        wmom_int = self._integer_ema("Wemb", wemb_grad_int)
+        wscaled = self._adaptive_normalize_v2("Wemb", wmom_int)
+        wres_prev = self._res.get("Wemb", np.zeros_like(self.Wemb, dtype=np.int64))
+        wres_new = wres_prev + wscaled
+        self._total_in["Wemb"] = self._total_in.get("Wemb", 0) + int(wscaled.sum())
+        wstep = np.sign(wres_new) * (np.abs(wres_new) // THRESHOLD)
+        wemb_prop = (self.Wemb.copy(), wres_new, wstep)
+
+        candidates = []
+        for name, (level, res_new, step) in proposals.items():
+            for ij in np.argwhere(step != 0):
+                ij = tuple(ij)
+                candidates.append((name, ij, abs(int(res_new[ij])), int(step[ij])))
+        wlevel, wres_new2, wstep2 = wemb_prop
+        for ij in np.argwhere(wstep2 != 0):
+            ij = tuple(ij)
+            candidates.append(("Wemb", ij, abs(int(wres_new2[ij])), int(wstep2[ij])))
+        candidates.sort(key=lambda c: -c[2])
+
+        commit_set = set()
+        eval_pool = candidates if self.VALIDATED_TOP_N is None else candidates[:self.VALIDATED_TOP_N]
+        trial_levels = {name: proposals[name][0].copy() for name in MATRICES}
+        trial_wemb = wemb_prop[0].copy()
+        cur_loss = self._batch_nll(idxs_arr)
+        for name, ij, mag, step_val in eval_pool:
+            if name == "Wemb":
+                old_val = int(trial_wemb[ij])
+                trial_wemb[ij] = old_val - step_val
+                self.Wemb = trial_wemb
+            else:
+                old_val = trial_levels[name][ij]
+                trial_levels[name][ij] = int(np.clip(old_val - step_val, -2, 2))
+                setattr(self, name, trial_levels[name])
+            new_loss = self._batch_nll(idxs_arr)
+            if new_loss <= cur_loss + 1e-9:
+                commit_set.add((name, ij))
+                cur_loss = new_loss
+            else:
+                if name == "Wemb":
+                    trial_wemb[ij] = old_val
+                    self.Wemb = trial_wemb
+                else:
+                    trial_levels[name][ij] = old_val
+                    setattr(self, name, trial_levels[name])
+
+        for name in MATRICES:
+            setattr(self, name, proposals[name][0])
+        self.Wemb = wemb_prop[0]
+
+        for name, (level, res_new, step) in proposals.items():
+            mask = np.zeros_like(step, dtype=bool)
+            for n2, ij in commit_set:
+                if n2 == name:
+                    mask[ij] = True
+            actual_step = np.where(mask, step, 0)
+            desired = level.astype(np.int64) - actual_step
+            new_level = np.clip(desired, -2, 2).astype(np.int8)
+            realized = level.astype(np.int64) - new_level.astype(np.int64)
+            res_final = res_new - realized * THRESHOLD
+            self._total_consumed[name] = self._total_consumed.get(name, 0) + int((realized * THRESHOLD).sum())
+            self._res[name] = res_final
+            setattr(self, name, new_level)
+
+        mask = np.zeros_like(wstep2, dtype=bool)
+        for n2, ij in commit_set:
+            if n2 == "Wemb":
+                mask[ij] = True
+        realized_step = np.where(mask, wstep2, 0)
+        W_mid = wlevel.astype(np.int64) - realized_step
+        decay = np.sign(W_mid) * (np.abs(W_mid) // EMB_DECAY_DIV)
+        W_new = W_mid - decay
+        clipped = np.clip(W_new, -MAX_EMB, MAX_EMB)
+        discarded = int(decay.sum()) + int((W_new - clipped).sum())
+        self._total_discarded = getattr(self, "_total_discarded", {})
+        self._total_discarded["Wemb"] = self._total_discarded.get("Wemb", 0) + discarded
+        self._total_consumed["Wemb"] = self._total_consumed.get("Wemb", 0) + int((realized_step * THRESHOLD).sum())
+        self._res["Wemb"] = wres_new2 - realized_step * THRESHOLD
+        self.Wemb = clipped
+
+        if BIAS_CORROB_ENABLED and corrob_eligible:
+            new_b, self._b_streak_count, self._b_streak_sign = self._corroborated_bias_step(
+                self.b, gb, lr_scale, self._b_streak_count, self._b_streak_sign)
+            new_bg, self._bg_streak_count, self._bg_streak_sign = self._corroborated_bias_step(
+                self.bg, gbg, lr_scale, self._bg_streak_count, self._bg_streak_sign)
+        else:
+            new_b = self.b - lr_scale * 1e-4 * gb
+            new_bg = self.bg - lr_scale * 1e-4 * gbg
+        self.b, self._last_excess_b = self._clip_and_shed(new_b, BIAS_CEIL)
+        self.bg, self._last_excess_bg = self._clip_and_shed(new_bg, BIAS_CEIL)
+
+        return loss / max(1, n)
 
 
 # 🎯 2026-10-09, ROOT CAUSE #5 -- found by directly instrumenting consolidate()'s ACCEPTED merges
