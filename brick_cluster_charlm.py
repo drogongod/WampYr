@@ -579,6 +579,25 @@ BIAS_CORROB_REUSE_THRESHOLD = 3   # 2026-10-29, real isolation finding (see BIAS
                        # isolation_test_bias_corrob.py (clean ~10x-worse vs ~3x-better separation
                        # across all 3 seeds at this threshold), not a guess.
 
+MAX_VOTES = 10            # 2026-11-02, confirmation-gated vote mechanism (see
+                       # lucy_west_memory_architecture_locked_20261102.md) -- NOT the same thing as
+                       # BIAS_CORROB_REUSE_THRESHOLD above (that gates a numerical-stability bias
+                       # step by raw reuse COUNT; this gates whether a WEIGHT UPDATE is even allowed
+                       # when re-teaching a brick that already holds taught content, by whether the
+                       # caller has marked the event as independently VERIFIED). Real-tested on the
+                       # standalone flybrain reservoir (flybrain_confirmation_gated_vote_test.py,
+                       # flybrain_decay_floor_test.py) before being wired in here.
+DECAY_BAND = 2         # max points a ceiling-reached vote can passively erode toward if it goes
+                       # unconfirmed -- floor = MAX_VOTES - DECAY_BAND. Bounded, not an open bleed.
+DECAY_AFTER = 15       # learn_line() calls ANYWHERE in the cluster (self._global_step is a
+                       # cluster-wide counter, not a per-brick one -- deliberate: this is meant as
+                       # a wall-clock-like proxy for "time passing," not "how often THIS specific
+                       # fact got used," which would reopen exactly the usage/confirmation
+                       # conflation this whole mechanism exists to avoid) of silence since a given
+                       # trace's own last confirmation, per point of erosion, capped at DECAY_BAND.
+                       # Both constants are explicitly flagged tunable hyperparameters, not
+                       # structural, same as the real test run.
+
 # 🛑 2026-10-09, real bug found running the actual 4.2MB production corpus (not a smaller test
 # slice): the shared Phi_neg was growing from EVERY line ever seen, unboundedly. Measured
 # directly, same corpus, same MERGE_SLACK=3.0, only size varying: 70 bricks at 224 lines -> 49 at
@@ -821,6 +840,14 @@ class BrickCluster:
         # cluster.generate() when no stored line exists for the matched brick. Already-trained-at-
         # checkpoint-time bricks (before this field existed) simply have an empty list here and
         # correctly fall back to the old generate() path, not a bug, see field's own doc above.
+        self.vote_count = []        # parallel to self.bricks: confirmation-gated vote (see
+        self.last_confirm_step = []  # MAX_VOTES/DECAY_BAND/DECAY_AFTER's comment above). Only ever
+        self.ceiling_reached = []   # consulted/mutated by learn_line() when a caller explicitly
+        self._global_step = 0       # passes confirmed=True/False -- legacy callers that never pass
+        # `confirmed` (every real production call site as of 2026-11-02) are completely unaffected;
+        # this bookkeeping exists but is never read or written on the legacy path. Pre-existing
+        # checkpoints loaded without these fields get them lazily via learn_line's own guard (same
+        # pattern as brick_taught_lines above), never an IndexError.
 
     def tfidf_sparse(self, line):
         """The real hot-path feature computation -- returns (idx, val), NEVER materializes a
@@ -874,6 +901,9 @@ class BrickCluster:
         self.brick_pos.append(_OnlineGaussian())
         self.pending_visited.append([])
         self.brick_taught_lines.append([])
+        self.vote_count.append(1)
+        self.last_confirm_step.append(self._global_step)
+        self.ceiling_reached.append(False)
         self._region_fresh = False   # the new brick belongs to no region in the old index yet --
         # see ROUTE_REGION_INDEX_MIN_BRICKS's comment; route() falls back to the exact flat scan
         # until the next consolidate() call rebuilds the index over the now-current population.
@@ -996,15 +1026,72 @@ class BrickCluster:
         self._region_members = region_members
         self._region_fresh = True
 
-    def learn_line(self, batches_for_line, line_text, lr_scale):
+    def _effective_vote(self, idx):
+        """Decayed READ view of vote_count[idx] -- never mutates storage (see MAX_VOTES/
+        DECAY_BAND/DECAY_AFTER's module comment). Only erodes a trace that has actually reached
+        the ceiling at some point since its last confirmation; bounded at DECAY_BAND total, lazily
+        recomputed from elapsed learn_line() calls on THIS brick rather than swept every call."""
+        if not self.ceiling_reached[idx]:
+            return self.vote_count[idx]
+        quiet = self._global_step - self.last_confirm_step[idx]
+        erosion = min(DECAY_BAND, quiet // DECAY_AFTER)
+        return max(0, self.vote_count[idx] - erosion)
+
+    def learn_line(self, batches_for_line, line_text, lr_scale, gated=False, confirmed=None):
         """batches_for_line: the windowed batches (same bucket-by-length convention as
         lutgtlm_ingest.py) for ONE line. Routes (possibly spawning), trains, updates the gate.
         Takes the raw line TEXT (not pre-computed features, unlike the original version) so TF-IDF
         weighting can use the CURRENT doc-frequency stats before updating them with this line --
-        computing features externally would make doc-frequency tracking inconsistent/bypassable."""
+        computing features externally would make doc-frequency tracking inconsistent/bypassable.
+
+        `gated`/`confirmed` (2026-11-02, see lucy_west_memory_architecture_locked_20261102.md):
+        gated=False (default) = UNGATED/legacy path, behaves EXACTLY as before these parameters
+          existed -- every real production call site (brickcluster_engine.py, lutgtlm_ingest.py,
+          the pipeline/test harnesses) calls learn_line without them and is completely unaffected.
+          Bulk corpus training is a different use case (trusted static corpus, possibly multiple
+          optimization epochs over the same line) than live conversational fact revision -- this
+          gate is for the NOT YET BUILT conversational-learning pipeline's verify step to opt into
+          explicitly, never a retroactive change to how existing training passes behave.
+        gated=True: `confirmed` becomes a real three-way signal, matching the vote mechanism
+          exactly as real-tested standalone (flybrain_confirmation_gated_vote_test.py Scenarios
+          A-C, flybrain_decay_floor_test.py D1-D4) --
+            None  = USAGE (mere repetition/assertion, no independent verification): a no-op,
+                    blocked entirely if the brick already holds taught content. This is the actual
+                    fix for the exploit REAL TEST RUN #3 confirmed on bare learn_batch (pure
+                    repetition flipped a correct brick's weights by rep 8 with zero verification
+                    anywhere) -- it only applies when the caller opts in via gated=True.
+            True  = independently VERIFIED agreement with what's already taught -- vote climbs
+                    toward MAX_VOTES, decay clock resets, update proceeds (reinforcement).
+            False = independently VERIFIED contradiction -- vote drops by 1; if still >0 (checked
+                    against the decayed _effective_vote), the update is BLOCKED and the stale
+                    belief survives; only once effective vote reaches 0 does it flip: old taught
+                    content discarded, vote resets to 1, and THIS call's line trains in fresh.
+          None of this applies to a brick's first-ever teach (empty brick_taught_lines) -- that
+          always proceeds regardless of confirmed, establishing the initial belief at vote=1."""
         features = self.tfidf_sparse(line_text)
         idx = self.route(features, for_training=True)
         brick = self.bricks[idx]
+        self._global_step += 1
+        if gated and self.brick_taught_lines[idx]:
+            if confirmed is None:
+                # usage: a no-op by design, see docstring above -- this is the whole point.
+                return idx, None
+            if confirmed:
+                self.vote_count[idx] = min(MAX_VOTES, self.vote_count[idx] + 1)
+                self.last_confirm_step[idx] = self._global_step
+                if self.vote_count[idx] == MAX_VOTES:
+                    self.ceiling_reached[idx] = True
+            else:  # verified contradiction
+                self.vote_count[idx] -= 1
+                if self._effective_vote(idx) > 0:
+                    # stale belief protected: block the weight update entirely.
+                    return idx, None
+                # vote exhausted -- flip: discard the old taught content, reset fresh under the
+                # new belief, and fall through to actually train on the new (contradicting) line.
+                self.brick_taught_lines[idx] = []
+                self.vote_count[idx] = 1
+                self.ceiling_reached[idx] = False
+                self.last_confirm_step[idx] = self._global_step
         # 2026-10-29: read reuse count BEFORE this call's own update (below) touches it -- the real
         # isolation finding behind BIAS_CORROB_REUSE_THRESHOLD needs "how many times was this brick
         # reactivated BEFORE now," not including the activation happening this call.
@@ -1233,6 +1320,13 @@ class BrickCluster:
             state[f"taught{i}__n"] = np.array(len(taught_lines))
             for j, ln in enumerate(taught_lines):
                 state[f"taught{i}__{j}"] = np.array(ln)
+            # Confirmation-gated vote state (2026-11-02, see MAX_VOTES/DECAY_BAND's module
+            # comment) -- same flatten-by-index pattern as taught_lines above, so it survives a
+            # real save/load cycle instead of silently resetting every server restart.
+            state[f"vote{i}__count"] = np.array(self.vote_count[i])
+            state[f"vote{i}__last_confirm_step"] = np.array(self.last_confirm_step[i])
+            state[f"vote{i}__ceiling_reached"] = np.array(int(self.ceiling_reached[i]))
+        state["global_step"] = np.array(self._global_step)
         return state
 
     @classmethod
@@ -1240,6 +1334,16 @@ class BrickCluster:
         n_bricks = int(state["n_bricks"])
         V = int(state["V"]); D_brick = int(state["D_brick"]); seed = int(state["seed"])
         state_keys = set(state.files) if hasattr(state, "files") else set(state.keys())
+        # FIX (2026-11-05, real RAM-blowout root cause): materialize the npz into a plain dict
+        # ONCE here. NpzFile.items()/.keys() are lazy with ZERO caching -- every call
+        # re-decompresses EVERY array in the whole archive from scratch (confirmed empirically).
+        # The loop below used to call state.items() once PER BRICK, so loading a checkpoint with
+        # n_bricks bricks and K total keys did n_bricks full-archive decompressions = O(n_bricks*K)
+        # array reads (measured: 402 bricks x 25,350 keys = 10,190,700 reads to load ONE
+        # checkpoint). A plain dict's .items()/.keys() are cheap and cached by definition, so this
+        # single conversion turns that into one real decompression pass, total. No-op (just a
+        # shallow copy) when state is already a plain dict, e.g. in tests.
+        state = dict(state.items())
         cluster = cls(V, D_brick, seed)
         cluster.neg.n = int(state["neg_n"])
         cluster.neg.sum = state["neg_sum"]
@@ -1284,4 +1388,15 @@ class BrickCluster:
             n_taught = int(state[n_taught_key]) if n_taught_key in state_keys else 0
             cluster.brick_taught_lines.append(
                 [str(state[f"taught{i}__{j}"]) for j in range(n_taught)])
+            # Confirmation-gated vote state: backward-compatible default (vote=1, never
+            # confirmed, not ceiling-reached) for any checkpoint saved before this existed --
+            # same real-checkpoint concern as brick_taught_lines above (amelia_teaches_lucy_mind.npz
+            # predates this too), never an IndexError on the next learn_line(gated=True) call.
+            vote_key = f"vote{i}__count"
+            cluster.vote_count.append(int(state[vote_key]) if vote_key in state_keys else 1)
+            lcs_key = f"vote{i}__last_confirm_step"
+            cluster.last_confirm_step.append(int(state[lcs_key]) if lcs_key in state_keys else 0)
+            cr_key = f"vote{i}__ceiling_reached"
+            cluster.ceiling_reached.append(bool(int(state[cr_key])) if cr_key in state_keys else False)
+        cluster._global_step = int(state["global_step"]) if "global_step" in state_keys else 0
         return cluster
