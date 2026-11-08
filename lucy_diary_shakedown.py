@@ -58,6 +58,19 @@ from pathlib import Path
 ENGINE_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(ENGINE_DIR))
 
+# 2026-11-08 BUG, found live by the shakedown: the item-215 "crash" that prompted the resource_guard
+# work was NOT the only way this script can die mid-run. This run died again at item 215 -- same
+# number, DIFFERENT cause -- on a plain UnicodeEncodeError raised by the progress print below
+# (`print(f"[{processed_this_run}/...")`), which writes an excerpt of real dataset/model text
+# straight to the Windows console's cp1252 encoding. The item's result was already safely written
+# to RESULTS_FILE (opened with encoding="utf-8") one line earlier -- only the console print crashed
+# -- but an unhandled exception there still kills the whole process. Fix: force stdout/stderr to
+# UTF-8 with errors="replace" so an unencodable character degrades to "?" on screen instead of
+# taking down the run; the results file's own correctness is untouched by this either way.
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
 import brickcluster_engine as E
 import resource_guard as RG
 import lutgtlm_ingest as LI  # noqa: F401 -- E already imports/configures this; kept as a direct
