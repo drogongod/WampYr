@@ -1,342 +1,524 @@
-"""Stage B shakedown: Lucy answers diary-derived questions for real, consulting Ornith (her host)
-only when her own weights don't already have it, then the gated vote mechanism
-(BrickCluster.learn_line(gated=True, confirmed=...)) learns from the result in the SAME turn --
-not a batch/offline DPO pass. This is the first real end-to-end run of that loop.
-
-Runs against a SANDBOX COPY of the real checkpoint (amelia_teaches_lucy_mind.SHAKEDOWN_SANDBOX_*)
--- the real mind at amelia_teaches_lucy_mind.npz is never opened by this script. Merge the sandbox
-checkpoint into the real one only on explicit instruction.
-
-Host consult goes through the real standalone llama-server driver (server.py's ensure_server(),
-port 8102 -- the same one brickcluster_engine.complete() uses via _reference()), NEVER Ollama.
-2026-11-04 fix: an earlier version of this script called Ollama directly, which was a mistake --
-the user's explicit decision for Stage B was "write a driver that calls Ornith directly, ollama a
-unessary failure point." Ollama's own keep-alive then held the ~9.65GB model loaded on a schedule
-this script didn't control, which is what left the concurrently-running Stage A extractor without
-enough memory and got it killed by the harness's low-memory reaper. This script now starts/stops
-the standalone server itself.
-
-Host consultation is UNGROUNDED by default (2026-11-04, reverted back from the 2026-11-03 grounded
-experiment): Ornith answers from its own knowledge only, never given the diary's evidence_quote.
-The 2026-11-03 version handed Ornith the evidence_quote directly because a fully blind host can't
-confirm a project-internal benchmark number it has no way to know, and a wrong first guess into an
-empty brick bypasses the vote gate entirely (first-ever teach always proceeds). That made the
-relay safe but circular -- Lucy was learning to reproduce quotes fed to her host, through her host,
-which is closer to recording than to evolving. The user's correction: "the goal is a free evolving
-LLM not a tape recorder" -- an ungrounded host that's sometimes wrong, with Lucy's bricks converging
-on the truth across repeated confirmed=True/False exposure via the vote mechanism, IS the real
-test, not a failure mode to engineer around. Pass --grounded to run the old evidence_quote-fed mode
-for comparison; it is no longer the default.
-
-Confirmation signal is a lexical Jaccard-overlap heuristic against the diary's ground_truth_answer
--- NOT a semantic judge. Deliberately crude and disclosed as such; the raw score is logged on every
-item so it can be audited and replaced later. >=CONFIRM_HIGH -> confirmed=True, <=CONFIRM_LOW ->
-confirmed=False, else confirmed=None (treated as mere usage, a no-op under the gate).
-
-2026-11-04, generalized beyond the diary corpus: --questions-file/--results-file/--checkpoint let
-this same driver run against a different source (e.g. the Shakespeare/Marlowe/Plato/romance
-language-skill pilot) with its own separate sandbox checkpoint -- the gated-vote teaching
-mechanics don't change per corpus, only the questions and the checkpoint do. For that pilot, run
-with --grounded: the goal there is real language exposure (the user's framing: "Ornith is not the
-person we are training, we are training Lucy West" -- Ornith's job is relaying/grounding the real
-source text, same proxy role as the diary extractor, not supplying its own guesses to be tested
-against for correctness). The ungrounded ("ask Ornith from its own knowledge, let the vote gate
-correct wrong guesses over time") mode is specifically for testing convergence against private,
-project-internal facts a general host could never otherwise know -- not for a literature corpus
-where grounded, faithful relay IS the whole point.
 """
-import argparse
+*** REWRITTEN 2026-11-08, Claude -- fixes a real architectural mistake in yesterday's rebuild. ***
+
+Jonathan caught it directly: yesterday's version reinvented its own parallel own-weights/host
+logic (my own `_own_weights_lookup`/`_generate_candidate`, my own ask_host()) instead of using the
+REAL, already-built, already evidence-tested production engine, brickcluster_engine.
+BrickClusterEngine -- found by reading brickcluster_engine.py directly, then cross-checking
+against WampYr_Mamba-3's evidence_contract_test_programming_agent.py (GitHub, public, already
+proven correct): own-weights-first via `_lucy_candidate()`/`complete()`, with a REAL calibrated
+retrieval-cosine-floor (0.5, from an actual measured failure case, not guessed), and -- the
+concrete thing I had backwards -- code answers verified by ACTUALLY RUNNING THEM, not by fuzzy
+text comparison. "A pretty answer is NOT proof" applies to code exactly as much as to trivia.
+
+What changed from yesterday:
+  - Own-weights check + host consult: now `brickcluster_engine.BrickClusterEngine.complete()` --
+    the SAME calibrated logic already proven in production, not a reimplementation of it.
+  - The one piece of the real engine actually modified: `_reference()`'s donor call normally goes
+    over HTTP to a llama-server.exe host (see brickcluster_engine.py's `post_json`/`_reference`).
+    Per Jonathan 2026-11-07 ("no Ollama... use PYTHON"), that HTTP call is replaced with the same
+    in-process llama-cpp-python call built yesterday, by monkey-patching the module-level
+    `post_json` function brickcluster_engine.py itself calls by bare name -- every other line of
+    brickcluster_engine.py runs completely unmodified.
+  - Verification for CODE answers: real `exec()`, following evidence_contract_test_programming_
+    agent.py's exact pattern, instead of jaccard. Jaccard is KEPT, but only as the fallback for
+    non-code trivia (diary/NLP/literature), where no execution oracle exists.
+  - Training: still goes through brick_cluster_charlm.BrickCluster.learn_line(gated=True,
+    confirmed=...) -- the confirmation-gated vote mechanism rebuilt and verified against ~7,700
+    real surviving result rows yesterday (lucy_west_memory_architecture_locked_20261102.md). That
+    mechanism's correctness is independent evidence from the engine-architecture mistake above: the
+    vote_before/vote_after/blocked_stale_belief/flipped fields and their exact train_status mapping
+    were read directly off real historical logs, not guessed, and still hold. What was wrong
+    yesterday was NOT the vote mechanism -- it was bypassing the real engine's own-weights/host
+    logic and using jaccard to verify code. BrickClusterEngine.accept_experience()/learn_accepted()
+    itself calls learn_line() UNGATED (no confirmed= at all) -- that path assumes a live human
+    makes the accept decision each time, which doesn't exist in this unattended bulk run, so this
+    script calls learn_line(gated=True, ...) directly rather than going through accept_experience().
+
+HONEST GAP, stated plainly: real per-problem execution verification (hand-built test cases, like
+evidence_contract_test_programming_agent.py's reverse_string test) does not exist for a generic
+600K-row dataset -- building that would be its own project. What IS real here: the ground_truth
+code is checked to actually parse (ast.parse), and the HOST'S candidate code is actually exec()'d
+and must run without crashing to count as verified -- a genuine, checkable pass/fail, not a text
+comparison, but narrower than a real per-problem unit-test suite. For non-Python or non-code rows,
+jaccard-vs-ground-truth remains the (already-disclosed, still-not-byte-recovered) fallback.
+"""
+import ast
+import contextlib
+import io
 import json
+import os
 import re
 import sys
 import time
+import traceback
+import uuid
 from pathlib import Path
-
-sys.stdout.reconfigure(encoding="utf-8", errors="backslashreplace")
 
 ENGINE_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(ENGINE_DIR))
 
-import os
-import subprocess
-import urllib.request
-import uuid as uuid_mod
+import brickcluster_engine as E
+import resource_guard as RG
+import lutgtlm_ingest as LI  # noqa: F401 -- E already imports/configures this; kept as a direct
+# import too since this script calls LI.ARCH/LI._line_batches directly below.
 
-import lutgtlm_ingest as LI  # noqa: E402
-import brickcluster_engine as BCE  # noqa: E402  (import resets LI.STATE to the REAL path as a
-# side effect -- see module docstring in brickcluster_engine.py line ~74. We override it again,
-# below, AFTER this import, before constructing any engine.)
+# Same in-process host groundwork as yesterday (REWRITTEN 2026-11-07, per Jonathan: no Ollama).
+HOST_MODEL_GGUF = Path(
+    r"C:\Users\Azazel\.ollama\models\blobs\sha256-05e0878744b36b7c55385ecb8aaf47bddf0b43f720dbfac5c79e489c02abca8f"
+)
+HOST_N_CTX = 8192
+HOST_N_GPU_LAYERS = -1
+_llm = None
 
-SANDBOX_CHECKPOINT = BCE.CHECKPOINT_DIR / "amelia_teaches_lucy_mind.SHAKEDOWN_SANDBOX_20261103.npz"
-DATASET_DIR = Path(r"C:\Users\Azazel\Desktop\Amelia's Dataset\Diary Dataset")
+
+def ensure_model():
+    """Loads the host model in-process, once. No subprocess, no HTTP server, no Ollama."""
+    global _llm
+    if _llm is not None:
+        return _llm
+    if not HOST_MODEL_GGUF.is_file():
+        raise FileNotFoundError(f"Host model missing: {HOST_MODEL_GGUF}.")
+    from llama_cpp import Llama
+    print(f"Loading host model in-process: {HOST_MODEL_GGUF} "
+          f"({HOST_MODEL_GGUF.stat().st_size / 1e9:.2f} GB)...", flush=True)
+    _llm = Llama(model_path=str(HOST_MODEL_GGUF), n_ctx=HOST_N_CTX,
+                 n_gpu_layers=HOST_N_GPU_LAYERS, use_mmap=False, verbose=False)
+    print("Host model loaded.", flush=True)
+    return _llm
+
+
+def _strip_reasoning(content):
+    """This model's chat template leaks raw <think>...</think> reasoning into content (found live
+    2026-11-07) -- keep only text after the LAST </think>, unchanged otherwise."""
+    if "</think>" in content:
+        return content.rsplit("</think>", 1)[1].strip()
+    return content.strip()
+
+
+HOST_MAX_TOKENS = 2048  # found live, 2026-11-08: the old default of 300 (carried over from
+# yesterday's trivia-only prompt) let a reasoning model burn its entire budget on hidden
+# <think>...</think> reasoning for a code question and get cut off BEFORE emitting any real
+# answer -- the "answer" that came back was literally unfinished reasoning prose, which exec()
+# correctly rejected as a SyntaxError (not a model-capability failure, a budget failure). Same
+# documented failure mode nlp_extract_questions.py already warned about: "the fix is a bigger
+# budget, not a retry" -- this does NOT retry, it gives real room to think before answering.
+# SUPERSEDED same day by enable_thinking=False below: even 2048 was not enough for some real
+# diary questions (4/187 real-run failures, "host exhausted 2048 tokens on reasoning, never
+# reached an answer") -- raising the budget further was just delaying the same failure, not
+# fixing it. Left at 2048 now as the ANSWER budget (plenty, since no hidden reasoning competes
+# for it anymore), not the reasoning budget.
+
+_chat_formatter = None
+
+
+def _get_chat_formatter(llm):
+    """Builds a Jinja2ChatFormatter directly from this model's own embedded chat template, once.
+    Needed because llama_cpp 0.3.35's Llama.create_chat_completion (checked its real signature
+    directly, no kwargs passthrough to the template) exposes no way to set `enable_thinking` --
+    the one thing this model's chat template actually branches on to suppress reasoning. Confirmed
+    live by reading tokenizer.chat_template out of the GGUF's own metadata: a Qwen3-style template
+    with `{%- if enable_thinking is defined and enable_thinking is false %}<think>\\n\\n</think>\\n\\n
+    {%- else %}<think>\\n{%- endif %}` immediately before the assistant turn -- rendering with
+    enable_thinking=False pre-closes the think block IN THE PROMPT, so the model never opens one.
+
+    THE BUG THIS GUARDS AGAINST, explicitly, so it can never silently recur: on 2026-11-07 the
+    host was moved from Ollama's HTTP API (where `"think": false` already handled this, see
+    lucy_donor_token_level_translator_correction.md) to this in-process call, and the thinking-
+    suppression fix was NOT carried over in the move -- nobody decided against it, it was just an
+    untransferred fix, and it cost 4/187 real items in the next day's run (host_call_failed,
+    "host exhausted 2048 tokens on reasoning, never reached an answer") before being caught and
+    re-applied on 2026-11-08 (lucy_diary_shakedown_enable_thinking_fix_20261108.md). A silent
+    assumption that `enable_thinking` does something just because this model's template supports
+    it is exactly how that regression could repeat under a different disguise -- e.g. if
+    HOST_MODEL_GGUF is ever pointed at a different donor model whose template does NOT define
+    `enable_thinking` at all, this code would render a prompt where the variable is simply ignored
+    (Jinja treats an undefined `enable_thinking` reference inside `is defined` as False, so the
+    `else` branch runs and a real `<think>\n` block opens, unsuppressed) -- not an error, just the
+    exact same budget-exhaustion bug back again, silently, with no signal pointing at the cause.
+    The check below turns that silent failure mode into a loud, fixable one at load time instead:
+    """
+    global _chat_formatter
+    if _chat_formatter is None:
+        from llama_cpp.llama_chat_format import Jinja2ChatFormatter
+        tmpl = llm.metadata["tokenizer.chat_template"]
+        if "enable_thinking" not in tmpl:
+            raise RuntimeError(
+                "HOST_MODEL_GGUF's chat template does not reference `enable_thinking` -- the "
+                "thinking-suppression fix this script relies on (see _get_chat_formatter's "
+                "docstring) has no effect on this template, so reasoning would run unsuppressed "
+                "and HOST_MAX_TOKENS could again be exhausted on hidden <think> reasoning before "
+                "any real answer is produced (the exact 2026-11-08 regression this check exists "
+                "to catch, not a hypothetical). If this model genuinely has no thinking mode, "
+                "remove this check deliberately; if it DOES support one, find its real toggle "
+                "(may not be named enable_thinking) and wire it into _get_chat_formatter before "
+                "trusting this script's HOST_MAX_TOKENS budget again."
+            )
+        _chat_formatter = Jinja2ChatFormatter(template=tmpl, eos_token="<|im_end|>",
+                                               bos_token="", add_generation_prompt=True)
+    return _chat_formatter
+
+
+def _inprocess_post_json(url, body, timeout=300):
+    """Monkey-patch target for brickcluster_engine.post_json -- _reference() calls this bare name
+    expecting an OpenAI-shaped chat-completion dict back from an HTTP POST; this returns the same
+    shape from the in-process model instead, so _reference()/complete() run completely unmodified
+    otherwise. `url` is accepted and ignored (there is no real endpoint anymore).
+
+    REWRITTEN 2026-11-08 to call enable_thinking=False (see _get_chat_formatter) via the
+    low-level create_completion API instead of create_chat_completion -- this is the in-process
+    equivalent of the "think": false fix the lost F:-drive version applied to Ornith over Ollama's
+    HTTP API (lucy_donor_token_level_translator_correction.md) for the exact same root cause: a
+    reasoning model burning its whole token budget on hidden <think> chain-of-thought and getting
+    cut off before emitting any real answer. Measured live against a real question that was
+    failing in today's run ("conceptual mistake blocking the model of serotonin"): thinking ON ->
+    finish_reason=length, truncated mid-reasoning, no answer; thinking OFF -> finish_reason=stop,
+    clean real answer in 390 tokens."""
+    llm = ensure_model()
+    fmt = _get_chat_formatter(llm)
+    rendered = fmt(messages=body.get("messages", []), enable_thinking=False)
+    max_tokens = body.get("max_tokens", HOST_MAX_TOKENS)
+    out = llm.create_completion(
+        prompt=rendered.prompt,
+        max_tokens=max_tokens,
+        stop=["<|im_end|>"],
+        temperature=body.get("temperature", 0.3),
+    )
+    choice = out.get("choices", [{}])[0]
+    text = choice.get("text", "")
+    finish_reason = choice.get("finish_reason")
+    if finish_reason == "length":
+        # Thinking is suppressed now (no <think> block ever opens), so a length cutoff means the
+        # ANSWER ITSELF ran out of room -- a real, different failure than the old reasoning-
+        # exhaustion case, not the same bug recurring under a new name.
+        raise TimeoutError(
+            f"host exhausted {max_tokens} tokens on its answer and got cut off before finishing "
+            f"(thinking suppressed via enable_thinking=False -- this is a real answer-length "
+            f"budget problem, not reasoning overhead)"
+        )
+    return {
+        "choices": [{"index": 0, "finish_reason": finish_reason,
+                     "message": {"role": "assistant", "content": _strip_reasoning(text)}}],
+        "usage": out.get("usage", {}),
+    }
+
+
+E.post_json = _inprocess_post_json  # the ONLY behavioral change made to the real engine.
+
+
+def _judge_answer_relevance(question, answer):
+    """2026-11-08, Jonathan directly: a canned guardrail non-answer trained as if it were real
+    content is categorically worse than a missing fact, and the prefix-list refusal guard above
+    only catches refusals that OPEN with a known phrase -- his own example slips past it entirely:
+    asked "what is Shakespeare's greatest play," getting back a suicide-hotline disclaimer, which
+    starts with "I'm sorry if you feel..." not any phrase this script already checks for. His own
+    proposed fix: Lucy herself isn't smart enough yet to notice a hotline number has nothing to do
+    with Shakespeare (true chicken-and-egg -- she needs the judgment to filter bad training, but
+    needs good training to develop the judgment) -- but something ELSE already in the pipeline IS
+    smart enough: the donor model itself, asked a second, NARROW question instead of trusting its
+    own first answer blind. Same "Frozen LLM Judge" pattern already in his own idea-reservoir file
+    (parasite_mamba.txt's A-GRAE section) and the same spirit as [[galatea_pair_selfsustaining]]'s
+    incorruptible-judge-floor requirement.
+
+    Deliberately narrow and cheap: one yes/no-shaped question, no chain-of-thought needed (already
+    running enable_thinking=False), small max_tokens. This is NOT asking the donor to re-answer or
+    re-verify factual correctness (jaccard/exec already do that) -- only whether the answer is even
+    ABOUT the question's actual subject, which catches a non-sequitur regardless of why it happened
+    (a safety disclaimer, a context mix-up, anything), without requiring Lucy's own capability to
+    exist at all. Returns True if the answer looks relevant, False if it looks like a mismatch, and
+    True (fail open -- do not contaminate training on a failed judge call) if the judge call itself
+    errors."""
+    judge_prompt = (
+        f"Question asked: {question}\n\nProposed answer: {answer}\n\n"
+        f"Does the proposed answer actually address the SUBJECT of the question above, even if it "
+        f"is wrong, incomplete, or a refusal due to lack of knowledge? Or is it something unrelated "
+        f"to the question's actual subject -- for example a generic safety disclaimer, crisis "
+        f"hotline, or boilerplate response that has nothing to do with what was actually asked? "
+        f"Reply with exactly one word: RELEVANT or MISMATCH."
+    )
+    try:
+        llm = ensure_model()
+        fmt = _get_chat_formatter(llm)
+        rendered = fmt(messages=[{"role": "user", "content": judge_prompt}], enable_thinking=False)
+        out = llm.create_completion(prompt=rendered.prompt, max_tokens=10,
+                                     stop=["<|im_end|>"], temperature=0.0)
+        verdict = out["choices"][0]["text"].strip().upper()
+        return "MISMATCH" not in verdict
+    except Exception:
+        return True
+
+
+GROUNDED_MODE = False
+SANDBOX_CHECKPOINT = E.CHECKPOINT_DIR / "amelia_teaches_lucy_mind.SHAKEDOWN_SANDBOX_20261103.npz"
+DATASET_DIR = Path(r"C:\Users\Azazel\Desktop\Amelia's Dataset")
 QUESTIONS_FILE = DATASET_DIR / "diary_questions.jsonl"
 RESULTS_FILE = DATASET_DIR / "lucy_shakedown_results.jsonl"
-# 2026-11-04: the three paths above are defaults for the diary corpus specifically. --questions-
-# file/--results-file/--checkpoint (added for the literature/romance language-skill pilot) let
-# this same driver run against a different corpus + its own separate sandbox checkpoint, without
-# forking the script -- the gated-vote teaching loop itself doesn't change per corpus.
 
-HOST_TIMEOUT = 180
-HOST_MAX_TOKENS = 400
-
-# 2026-11-04 FIX #2: an earlier version of this script called Ollama directly, which was already
-# wrong (the user's explicit decision for Stage B was "write a driver that calls Ornith directly,
-# ollama a unessary failure point") -- Ollama's own keep-alive held the ~9.65GB model loaded on a
-# schedule this script didn't control, starving the concurrently-running Stage A extractor of
-# memory and getting it reaped. The first fix routed through server.py's ensure_server(), which
-# launches a standalone llama-server.exe -- correct in spirit, but that module hardcodes the binary
-# on H:\ (a second drive this script doesn't otherwise depend on). Per the user: inline the launch
-# here directly, using the C:\ copy -- one fewer external module, one fewer drive dependency.
-HOST_EXE = Path(r"C:\llama.cpp\llama-server.exe")
-HOST_MODEL_GGUF = Path(r"F:\LLM\Ornith-1.5-9B-uncensored-GGUF\Ornith-1.5-9B-uncensored.Q8_0.gguf")
-HOST_URL = "http://127.0.0.1:8102"
-HOST_ALIAS = "vampire-lucywest"  # must match brickcluster_engine.REFERENCE_MODEL exactly
+# RECONSTRUCTED fallback for non-code rows only (see module docstring). Unchanged from yesterday.
+CONFIRM_JACCARD = 0.35
+CONTRADICT_JACCARD = 0.12
 
 
-def _host_ready():
+def _word_set(s):
+    return set(re.findall(r"[a-z0-9']+", (s or "").lower()))
+
+
+def _jaccard(a, b):
+    A, B = _word_set(a), _word_set(b)
+    if not A and not B:
+        return 0.0
+    return len(A & B) / len(A | B)
+
+
+def _extract_code(text):
+    """Same extract_code() pattern as evidence_contract_test_programming_agent.py: pull the first
+    fenced code block, or fall back to the whole text if there is no fence."""
+    m = re.search(r"```(?:python)?\s*(.*?)```", text or "", re.DOTALL)
+    return m.group(1).strip() if m else (text or "").strip()
+
+
+def _is_python_question(ground_truth_answer):
+    """RECONSTRUCTED, deliberately narrow: true execution verification needs hand-built test
+    cases per problem (what evidence_contract_test_programming_agent.py does); this dataset has
+    none. Only treat a row as code-verifiable when the GROUND TRUTH answer itself parses as valid
+    Python -- a real, checkable fact (ast.parse succeeding), not a guess about the row's topic."""
+    code = _extract_code(ground_truth_answer)
+    if not code:
+        return False
     try:
-        with urllib.request.urlopen(HOST_URL + "/health", timeout=2) as r:
-            return r.status == 200
-    except Exception:
+        ast.parse(code)
+        return True
+    except SyntaxError:
         return False
 
 
-def ensure_host():
-    """Start the standalone llama-server directly from C:\\llama.cpp if nothing is already
-    listening on 8102; verify by alias (the donor ROLE) if something already is, same convention
-    as the pre-existing server.py. Returns the Popen handle only if THIS call started it, so the
-    caller knows whether it's responsible for stopping it again."""
-    if _host_ready():
-        with urllib.request.urlopen(HOST_URL + "/v1/models", timeout=5) as r:
-            models = json.load(r).get("data", [])
-        if not any(HOST_ALIAS == m.get("id") for m in models):
-            raise RuntimeError(f"Port 8102 is occupied by a different model; no process was stopped.")
-        return None
-    if not HOST_EXE.is_file() or not HOST_MODEL_GGUF.is_file():
-        raise FileNotFoundError(f"Host binary or model missing: {HOST_EXE}, {HOST_MODEL_GGUF}")
-    log_dir = ENGINE_DIR / "data" / "server"
-    log_dir.mkdir(parents=True, exist_ok=True)
-    log_path = log_dir / f"server_{uuid_mod.uuid4().hex}.log"
-    args = [str(HOST_EXE), "-m", str(HOST_MODEL_GGUF), "--host", "127.0.0.1", "--port", "8102",
-            "--alias", HOST_ALIAS, "-c", "8192", "-np", "1", "-ngl", "99", "--reasoning", "auto",
-            "--no-mmap"]
-    # --no-mmap (2026-11-05, real RAM-pressure finding): default llama.cpp mmaps the whole GGUF
-    # file to load it and keeps that mapping resident even after copying every tensor to the GPU
-    # (-ngl 99 here). Measured directly: with mmap, this 9.53GB Q8_0 file left llama-server's
-    # WorkingSet (real physical RSS) at ~10.8GB despite the model living on the GPU (confirmed via
-    # nvidia-smi, ~8.7GB VRAM, unchanged by this flag). --no-mmap dropped real RSS to ~1.5GB with
-    # identical GPU usage -- this was the dominant cause of the low-memory reaper killing teaching
-    # runs tonight, far bigger than anything on Lucy's own (BrickCluster) side.
-    with log_path.open("xb") as f:
-        proc = subprocess.Popen(args, cwd=str(ENGINE_DIR), env=os.environ.copy(), stdout=f, stderr=f,
-                                 creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0)
-    print(f"Starting standalone host from C:\\ (pid {proc.pid}). Log: {log_path}", flush=True)
-    for _ in range(90):
-        if proc.poll() is not None:
-            raise RuntimeError(f"Host exited; inspect {log_path}")
-        if _host_ready():
-            print(f"Host ready: {HOST_URL}", flush=True)
-            return proc
-        time.sleep(1)
-    raise RuntimeError(f"Host still loading; inspect {log_path}. It was not stopped.")
-
-CONFIRM_HIGH = 0.30
-CONFIRM_LOW = 0.08
-
-# 2026-11-03 fix: a host REFUSAL/uncertainty answer ("I can't reliably answer", "doesn't clearly
-# specify") scores low Jaccard for the wrong reason -- it isn't asserting anything false, it's
-# declining to assert at all. The first real 5-item shakedown run showed this get misclassified as
-# confirmed=False (a verified CONTRADICTION), which trained Lucy's brick on the host's hedge text
-# as if it were a taught fact. A refusal must always be treated as confirmed=None (mere non-info,
-# a no-op), never as a contradiction, regardless of its similarity score.
-REFUSAL_MARKERS = (
-    "don't have", "doesn't have", "do not have", "doesn't specify", "does not specify",
-    "doesn't clearly", "does not clearly", "can't confirm", "cannot confirm", "can't reliably",
-    "cannot reliably", "can't tell", "cannot tell", "i don't know", "i do not know",
-    "unable to", "not sure", "no way to know", "rather not guess", "won't guess", "wouldn't guess",
-    "can't determine", "cannot determine", "isn't clear", "is not clear", "i can't",
-    # 2026-11-04 widened: a real result row had Ornith say "the reference material provided
-    # doesn't answer your question... doesn't mention any team, a mistake" -- a genuine refusal,
-    # none of the markers above matched it, and it scored confirmed=False (a contradiction)
-    # instead of confirmed=None. Caught only by the vote gate's stale-belief protection that time
-    # (blocked_stale_belief); would NOT have been caught on a brand-new empty brick, since a
-    # first-ever teach bypasses the gate regardless of confirmed.
-    "doesn't answer", "does not answer", "doesn't mention", "does not mention",
-    "doesn't address", "does not address", "no mention of", "doesn't contain", "does not contain",
-    "didn't include", "did not include", "didn't mention", "did not mention",
-)
-
-
-def is_refusal(text):
-    t = (text or "").lower()
-    return any(marker in t for marker in REFUSAL_MARKERS)
-
-STOPWORDS = {
-    "the", "a", "an", "is", "are", "was", "were", "be", "been", "to", "of", "in", "on", "for",
-    "and", "or", "with", "that", "this", "it", "as", "by", "at", "from", "but", "not", "no", "if",
-    "so", "did", "do", "does", "what", "why", "how", "which", "who", "when", "where", "there",
-    "than", "then", "its", "into", "out", "up", "down", "over", "under", "about", "all", "any",
-}
-_WORD_RE = re.compile(r"[a-z0-9]+")
-
-
-def tokenize(text):
-    # NO length filter (2026-11-03 fix): the first real shakedown run showed this project's diary
-    # answers are often short numerics/units ("45.58", "ms", "1x", "0.23x") -- a len>2 floor meant
-    # to drop connective words was silently discarding exactly the content these answers consist
-    # of, scoring a verbatim-correct host answer ("...was 45.58 ms/window") as only 0.11 similar.
-    return {w for w in _WORD_RE.findall((text or "").lower()) if w not in STOPWORDS}
-
-
-def jaccard(a, b):
-    ta, tb = tokenize(a), tokenize(b)
-    if not ta or not tb:
-        return 0.0
-    return len(ta & tb) / len(ta | tb)
-
-
-def ask_ornith(engine, question, context=None):
-    if context:
-        system = (
-            "You are being consulted as a knowledgeable host with access to the following "
-            "reference material. Answer the question directly and concisely in 1-3 sentences, "
-            "using the reference material when it's relevant. If the material doesn't actually "
-            "answer the question, say so plainly instead of guessing.\n\n"
-            f"REFERENCE MATERIAL:\n{context}"
-        )
-    else:
-        system = (
-            "Answer the question directly and concisely in 1-3 sentences, from your own "
-            "general knowledge only. If you genuinely don't know, say so plainly instead of "
-            "guessing."
-        )
-    body = {
-        "messages": [
-            {"role": "system", "content": system},
-            {"role": "user", "content": question},
-        ],
-        "temperature": 0.3,
-        "max_tokens": HOST_MAX_TOKENS,
-    }
+def _verify_runs(candidate_text):
+    """REAL exec()-based verification, same "a pretty answer is NOT proof" discipline as
+    evidence_contract_test_programming_agent.py's STEP 3. Honest scope: no structured test cases
+    exist for this generic dataset, so the strongest check available is "does the candidate code
+    actually parse and execute without crashing" -- a real pass/fail, not a hand-built behavioral
+    test. Returns (ran_ok, error)."""
+    code = _extract_code(candidate_text)
+    if not code:
+        return False, "no code extracted from candidate"
     try:
-        # engine._reference() is the real production call used by BrickClusterEngine.complete() --
-        # same loopback-only validation, same donor model, no separate Ollama policy to fight.
-        resp = engine._reference(body)
-        return (resp.get("choices", [{}])[0].get("message", {}) or {}).get("content", "").strip(), None
+        ast.parse(code)
+    except SyntaxError as exc:
+        return False, f"SyntaxError: {exc}"
+    try:
+        with contextlib.redirect_stdout(io.StringIO()):
+            exec(compile(code, "<lucy_candidate>", "exec"), {})
+        return True, None
     except Exception as exc:
-        return "", f"{type(exc).__name__}: {exc}"
+        return False, f"{type(exc).__name__}: {exc}"
 
 
-def load_questions():
-    items = []
-    with QUESTIONS_FILE.open(encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            items.append(json.loads(line))
-    return items
-
-
-def load_done_keys():
-    done = set()
-    if RESULTS_FILE.is_file():
-        with RESULTS_FILE.open(encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    d = json.loads(line)
-                except ValueError:
-                    continue
-                done.add(d.get("item_key"))
-    return done
-
-
-def item_key(item):
-    return f"{item.get('source_file')}::{item.get('section_header')}::{item.get('question')}"
-
-
-GROUNDED_MODE = False  # set from --grounded in main() before the loop starts
-
-
-def process_one(engine, item):
-    question = item["question"]
-    ground_truth = item.get("ground_truth_answer", "")
-    prompt_text = f"User: {question}\nLucy:"
-
+def process_item(engine, row):
+    """Processes one question row via the REAL engine (BrickClusterEngine.complete() for
+    own-weights-check + host-fallback, exactly as production does it), verifies the answer (real
+    exec() for Python-code rows, jaccard fallback otherwise), then trains via the confirmation-
+    gated vote mechanism (brick_cluster_charlm.BrickCluster.learn_line(gated=True, confirmed=...),
+    independently verified against real historical logs yesterday -- see module docstring)."""
     t0 = time.time()
-    candidate, candidate_error, brick_matched, candidate_source = engine._lucy_candidate(question)
-    own_weights_hit = bool(brick_matched and candidate and candidate_source == "retrieved")
+    question = row["question"]
+    ground_truth = row.get("ground_truth_answer", "")
+    evidence_quote = row.get("evidence_quote", "")
+    item_key = f"{row.get('source_file', '')}::{row.get('section_header', '')}::{question}"
 
-    host_consulted = False
-    host_answer, host_error = None, None
+    if GROUNDED_MODE and evidence_quote:
+        user_content = f"Reference material: {evidence_quote}\n\nQuestion: {question}"
+    else:
+        user_content = question
+    body = {"messages": [{"role": "user", "content": user_content}], "stream": False}
+    try:
+        response = engine.complete(body)  # the REAL own-weights-check-then-host-fallback call.
+    except Exception as exc:
+        # _complete_locked() re-raises a failed donor call as RuntimeError (see brickcluster_
+        # engine.py's _complete_locked) -- uncaught, that would crash the ENTIRE run on one bad
+        # item (e.g. the host running out of its reasoning budget, found live). A single item's
+        # host failure must not take down a multi-thousand-item bulk run.
+        return {
+            "item_key": item_key, "question": question, "ground_truth_answer": ground_truth,
+            "own_weights_hit": False, "lucy_candidate": "", "lucy_candidate_source": None,
+            "lucy_candidate_error": None, "host_consulted": True, "host_answer": None,
+            "host_error": f"{type(exc).__name__}: {exc}", "final_answer_shown_as_lucys": "",
+            "verification_method": None, "exec_ran_ok": None, "exec_error": None,
+            "jaccard_sim": None, "confirmed": None, "elapsed_s": round(time.time() - t0, 1),
+            "train_status": "host_call_failed", "brick_index": None, "vote_before": None,
+            "vote_after": None, "blocked_stale_belief": False, "flipped": False, "loss": None,
+            "is_new_brick": False, "experience_id": None, "session_id": None,
+        }
+    route = response["vampire_route"]
+    final_answer = response["choices"][0]["message"].get("content") or ""
+
+    own_weights_hit = route["source"] == "lucy_own_weights"
+    host_consulted = route["source"] == "frozen_donor"
+    lucy_candidate = route["lucy_candidate"]
+    lucy_candidate_source = route["lucy_candidate_source"]
+    lucy_candidate_error = route["lucy_candidate_error"]
+
+    # 2026-11-08, found live after the full 223-item run: GROUNDED_MODE defaults False, and this
+    # run was launched without --grounded, so the host got the bare question with ZERO reference
+    # material for a corpus that is entirely private project internals (every one of the 223 rows
+    # has a real evidence_quote the host never saw). Measured result: 203/223 host answers were
+    # refusals ("I don't have specific information about..."), and 201 of those got trained into
+    # a brick as if they were real content -- Lucy was being taught to recite confusion, not facts.
+    # This guard stops that from EVER happening silently again, in any mode: a refusal-shaped
+    # answer is never fed to learn_line, grounded or not, since a grounded run can still refuse on
+    # a genuinely hard item. This does NOT fix the root cause (wrong mode for this corpus) -- that
+    # needs a fresh checkpoint re-run with --grounded; this only stops the symptom from corrupting
+    # weights in the meantime.
+    #
+    # Split into two categories same day, per Jonathan directly: a lack-of-knowledge refusal is a
+    # different, far less dangerous thing than a SAFETY/GUARDRAIL canned non-answer being trained
+    # as if it were real content on a legitimate historical or literary question -- his own
+    # examples: real scholarly debate on Carthaginian/Phoenician child sacrifice (stillbirth/birth-
+    # defect burial grounds vs. live sacrifice is a genuine, real historical question, not
+    # "exploitation content") getting a generic exploitation-of-children refusal trained as the
+    # answer; or Romeo and Juliet's actual text getting a suicide-prevention disclaimer trained in
+    # as if it were part of the play. Checked tonight's real 223 rows directly: 0 genuine policy
+    # refusals occurred (the donor is an explicitly "uncensored" finetune, and the 2 near-matches
+    # were honest epistemic caution, not guardrail language) -- this is a real structural gap, not
+    # yet a fired incident, closed BEFORE it could produce one rather than after. A policy refusal
+    # is NOT just skipped like an epistemic one -- it's tagged distinctly so a human sees it,
+    # because the project's own standing position (over_refusal_is_the_disease.md,
+    # galatea_manipulate_not_lie.md) is that a corporate-liability non-answer is never equivalent
+    # to truth, and silently absorbing one the same way as "I don't know" would hide exactly the
+    # case most worth a human looking at.
+    _final_lower = final_answer.strip().lower()
+    host_epistemic_refused = host_consulted and final_answer.strip().startswith((
+        "I don't have", "I do not have", "I'm not certain", "I'm not aware", "I'm not familiar",
+        "I am not aware", "I'm unable to", "I don't recognize", "I want to be upfront",
+        "It looks like your question is missing", "Could you let me know", "Could you clarify",
+    ))
+    host_policy_refused = host_consulted and not host_epistemic_refused and any(m in _final_lower for m in (
+        "i can't provide", "i cannot provide", "i'm not able to provide", "i won't generate",
+        "i cannot create", "i can't create", "i must decline", "i'm not comfortable",
+        "against my guidelines", "content policy", "i can't assist with", "i cannot assist with",
+        "i'm unable to provide", "i don't feel comfortable", "this could be harmful",
+        "i can't help with that", "i cannot help with that", "exploitation of children",
+        "i'm not going to provide", "i won't be able to help with that",
+    ))
+    # Catches what the prefix-list checks above structurally cannot: a mismatch that doesn't open
+    # with any known refusal phrase (Jonathan's own example -- a suicide-hotline disclaimer in
+    # response to a Shakespeare question starts "I'm sorry if you feel..."). Only spends the extra
+    # judge call on host-consulted, non-refused rows -- an already-detected refusal doesn't need a
+    # second opinion, and own-weights hits never reach the host at all.
+    host_mismatch = (host_consulted and not host_epistemic_refused and not host_policy_refused
+                      and not _judge_answer_relevance(question, final_answer))
+    host_refused = host_epistemic_refused or host_policy_refused or host_mismatch
+
+    is_code = _is_python_question(ground_truth)
+    if is_code and host_consulted:
+        verification_method = "exec"
+        ran_ok, exec_error = _verify_runs(final_answer)
+        confirmed = ran_ok  # a real pass/fail, never ambiguous -- unlike jaccard, there is no
+        # "ambiguous" middle ground for "did it crash".
+        jaccard_sim = round(_jaccard(final_answer, ground_truth), 4)  # still logged, diagnostic
+        # only -- NOT what confirmed is derived from for this row.
+    else:
+        verification_method = "jaccard"
+        ran_ok, exec_error = None, None
+        jaccard_sim = round(_jaccard(final_answer, ground_truth), 4)
+        confirmed = (True if jaccard_sim >= CONFIRM_JACCARD
+                     else False if jaccard_sim <= CONTRADICT_JACCARD else None)
+
+    # Already known from her own weights: production's own rule (LUCY_SKIP_DONOR_WHEN_MATCHED)
+    # is that a verbatim-retrieved answer is handed back WITHOUT any new training -- nothing to
+    # confirm, contradict, or train, she already had it.
     if own_weights_hit:
-        final_answer = candidate
+        train_status, idx, loss = "already_known_no_training_needed", None, None
+        vote_before = vote_after = None
+        is_new_brick = False
+    elif host_refused:
+        # Distinct status strings, not just one -- a policy refusal or a judge-caught mismatch on
+        # a legitimate question is worth a human's eyes (it means the donor itself produced
+        # something actively wrong, not merely absent); a lack-of-knowledge refusal is routine.
+        if host_policy_refused:
+            train_status = "host_policy_refused_FLAG_FOR_REVIEW"
+        elif host_mismatch:
+            train_status = "host_answer_mismatch_FLAG_FOR_REVIEW"
+        else:
+            train_status = "host_refused_not_trained"
+        idx, loss = None, None
+        vote_before = vote_after = None
+        is_new_brick = False
     else:
-        host_consulted = True
-        ctx = item.get("evidence_quote") if GROUNDED_MODE else None
-        host_answer, host_error = ask_ornith(engine, question, context=ctx)
-        final_answer = host_answer
+        taught_line = f"User: {question}\nLucy: {final_answer.strip()[:2048]}"
+        batches = LI._line_batches(taught_line)
+        probe_idx = engine.cluster.route(engine.cluster.tfidf_sparse(taught_line),
+                                          for_training=False)
+        # route(for_training=False) only ever returns None on a genuinely empty cluster (zero
+        # bricks yet -- confirmed by reading route() directly); a fresh spawn always starts at
+        # vote_count=1 (_spawn()'s own init).
+        is_new_brick = (probe_idx is None
+                        or len(engine.cluster.brick_taught_lines[probe_idx]) == 0)
+        vote_before = (1 if probe_idx is None or probe_idx >= len(engine.cluster.vote_count)
+                        else engine.cluster.vote_count[probe_idx])
+        confirmed_for_gate = True if is_new_brick else confirmed
+        if batches:
+            idx, loss = engine.cluster.learn_line(batches, taught_line, lr_scale=1.0, gated=True,
+                                                   confirmed=confirmed_for_gate)
+        else:
+            idx, loss = probe_idx, None  # too short to form even one training window.
+        vote_after = (vote_before if idx is None or idx >= len(engine.cluster.vote_count)
+                       else engine.cluster.vote_count[idx])
+        if loss is not None:
+            train_status = "updated"
+        elif confirmed_for_gate is False:
+            train_status = "blocked_stale_belief"
+        else:
+            train_status = "no_update_usage"
 
-    sim = jaccard(final_answer, ground_truth)
-    if not final_answer.strip() or is_refusal(final_answer):
-        confirmed = None
-    elif sim >= CONFIRM_HIGH:
-        confirmed = True
-    elif sim <= CONFIRM_LOW:
-        confirmed = False
-    else:
-        confirmed = None
+    blocked_stale_belief = train_status == "blocked_stale_belief"
+    flipped = bool((not own_weights_hit) and confirmed is False and loss is not None)
 
-    line_text = f"User: {question.strip()[-4096:]}\nLucy: {final_answer.strip()[:2048]}"
-    batches = LI._line_batches(line_text)
-    result = {
-        "item_key": item_key(item), "question": question, "ground_truth_answer": ground_truth,
-        "own_weights_hit": own_weights_hit, "lucy_candidate": candidate,
-        "lucy_candidate_source": candidate_source, "lucy_candidate_error": candidate_error,
-        "host_consulted": host_consulted, "host_answer": host_answer, "host_error": host_error,
-        "final_answer_shown_as_lucys": final_answer, "jaccard_sim": round(sim, 4),
-        "confirmed": confirmed, "elapsed_s": round(time.time() - t0, 1),
+    return {
+        "item_key": item_key,
+        "question": question,
+        "ground_truth_answer": ground_truth,
+        "own_weights_hit": own_weights_hit,
+        "lucy_candidate": lucy_candidate,
+        "lucy_candidate_source": lucy_candidate_source,
+        "lucy_candidate_error": lucy_candidate_error,
+        "host_consulted": host_consulted,
+        "host_answer": final_answer if host_consulted else None,
+        "host_error": None,
+        "final_answer_shown_as_lucys": final_answer,
+        "verification_method": verification_method,
+        "exec_ran_ok": ran_ok,
+        "exec_error": exec_error,
+        "jaccard_sim": jaccard_sim,
+        "confirmed": confirmed,
+        "elapsed_s": round(time.time() - t0, 1),
+        "train_status": train_status,
+        "brick_index": idx,
+        "vote_before": vote_before,
+        "vote_after": vote_after,
+        "blocked_stale_belief": blocked_stale_belief,
+        "flipped": flipped,
+        "loss": loss,
+        "is_new_brick": is_new_brick,
+        "experience_id": route.get("experience_id"),
+        "session_id": route.get("session_id"),
     }
-    if not batches:
-        result["train_status"] = "line_too_short"
-        result["vote_before"] = result["vote_after"] = None
-        result["blocked_stale_belief"] = False
-        result["flipped"] = False
-        result["brick_index"] = None
-        return result
 
-    predicted_idx = engine.cluster.route(engine.cluster.tfidf_sparse(line_text), for_training=False)
-    vote_before = (engine.cluster.vote_count[predicted_idx]
-                   if predicted_idx is not None and predicted_idx < len(engine.cluster.vote_count)
-                   else None)
-    taught_before = (list(engine.cluster.brick_taught_lines[predicted_idx])
-                      if predicted_idx is not None
-                      and predicted_idx < len(engine.cluster.brick_taught_lines) else [])
-    n_bricks_before = len(engine.cluster.bricks)
-    idx2, loss = engine.cluster.learn_line(batches, line_text, lr_scale=BCE.LR_SCALE,
-                                            gated=True, confirmed=confirmed)
-    vote_after = engine.cluster.vote_count[idx2] if idx2 < len(engine.cluster.vote_count) else None
-    blocked = (loss is None and confirmed is False)
-    # flipped = a real contradiction that actually trained (loss is not None), on a brick that
-    # already had taught content before this call (a first-ever teach always trains regardless of
-    # confirmed and isn't a "flip" of anything). NOT "vote_after == 1" -- that's also true of a
-    # plain decrement (e.g. 2 -> 1, correctly blocked) and wrongly flagged a blocked call as a
-    # flip in the first real 5-item shakedown run.
-    flipped = (confirmed is False and loss is not None and bool(taught_before))
-    result.update({
-        "train_status": "blocked_stale_belief" if blocked else (
-            "no_update_usage" if (loss is None and confirmed is None) else "updated"),
-        "brick_index": int(idx2), "vote_before": vote_before, "vote_after": vote_after,
-        "blocked_stale_belief": blocked, "flipped": flipped,
-        "loss": loss, "is_new_brick": idx2 >= n_bricks_before,
-    })
-    return result
+
+def _atomic_save(engine, path):
+    """Same atomic-write fix as yesterday -- np.savez() direct-to-final-path is exactly the call
+    that crashed with OSError when the drive vanished mid-write during the original incident."""
+    import numpy as np
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_name(f"{path.stem}.tmp_{uuid.uuid4().hex}.npz")
+    state = engine.cluster.export_state()
+    np.savez(tmp_path, ARCH=LI.ARCH, seen=engine.seen, ingests=engine.ingests, **state)
+    os.replace(tmp_path, path)
 
 
 def main():
+    # VERIFIED (original lines ~339-374, exact):
+    import argparse
     ap = argparse.ArgumentParser()
     ap.add_argument("--resume", action="store_true")
     ap.add_argument("--limit", type=int, default=None)
@@ -362,91 +544,121 @@ def main():
     if args.checkpoint:
         SANDBOX_CHECKPOINT = Path(args.checkpoint)
 
-    LI.STATE = str(SANDBOX_CHECKPOINT)
+    E.LI.STATE = str(SANDBOX_CHECKPOINT)
     print("=" * 70)
-    print("LUCY LIVE SHAKEDOWN (Stage B) -- gated vote mechanism, real host consult")
-    print(f"Host grounding: {'GROUNDED (evidence_quote fed to host)' if GROUNDED_MODE else 'UNGROUNDED (host answers from its own knowledge)'}")
-    print(f"Checkpoint (SANDBOX, never the real mind): {LI.STATE}")
+    print("LUCY LIVE SHAKEDOWN (Stage B) -- real BrickClusterEngine, gated vote mechanism")
+    print(f"Host grounding: {'GROUNDED' if GROUNDED_MODE else 'UNGROUNDED'}")
+    print(f"Checkpoint (SANDBOX, never the real mind): {E.LI.STATE}")
     print(f"Questions:  {QUESTIONS_FILE}")
     print(f"Results:    {RESULTS_FILE}")
     print("=" * 70)
 
-    started_proc = ensure_host()  # None if already running elsewhere; a Popen handle if THIS run
-    # just started it -- only then do we stop it ourselves when done, below.
-    print(f"Host: {HOST_URL} (standalone llama-server from C:\\, "
-          f"{'started by this run' if started_proc else 'already running'})")
+    # 2026-11-08: added after this exact script died at 215/223 with exit code 1 and no captured
+    # traceback (stdout had been redirected to a file that no longer exists). Checked for outside
+    # interference first (Windows event logs, OOM-killer events, crash dumps, disk health) -- found
+    # NONE, which points at an ordinary unhandled exception rather than something external. Most
+    # likely real cause: several heavy diagnostic scripts were run concurrently with this pipeline
+    # that same window, competing for RAM. Startup floor is checked ONCE here, before the ~9.5GB
+    # host model even loads -- a tight-but-survivable startup would otherwise look fine for the
+    # first several items and only fail later once memory fragments further.
+    MIN_FREE_RAM_STARTUP_GB = 6.0
+    free_gb = RG.available_gb()
+    if free_gb < MIN_FREE_RAM_STARTUP_GB:
+        raise RuntimeError(
+            f"Only {free_gb:.1f}GB RAM free, below the {MIN_FREE_RAM_STARTUP_GB}GB startup floor "
+            f"(host model alone is ~9.5GB). Close other processes before starting -- this is the "
+            f"exact resource-contention class that killed this script's 2026-11-08 run silently; "
+            f"refusing to start into the same hole rather than fail later with no traceback."
+        )
+    RG.mark_running("lucy_diary_shakedown")
 
-    engine = BCE.BrickClusterEngine()
-    print(f"Loaded sandbox cluster: {len(engine.cluster.bricks)} bricks, seen={engine.seen} chars")
+    ensure_model()
+    engine = E.BrickClusterEngine()
 
-    items = load_questions()
-    done = load_done_keys() if args.resume else set()
-    if args.limit:
-        items = items[:args.limit]
-
-    counts = {"own_weights": 0, "host_consulted": 0, "confirmed_true": 0, "confirmed_false": 0,
-              "confirmed_none": 0, "blocked_stale_belief": 0, "flipped": 0, "errors": 0,
-              "line_too_short": 0, "processed": 0}
-
-    RESULTS_FILE.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        with RESULTS_FILE.open("a", encoding="utf-8") as out:
-            for i, item in enumerate(items):
-                key = item_key(item)
-                if key in done:
+    done_keys = set()
+    if args.resume and RESULTS_FILE.is_file():
+        with RESULTS_FILE.open(encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
                     continue
                 try:
-                    result = process_one(engine, item)
+                    done_keys.add(json.loads(line)["item_key"])
+                except Exception:
+                    continue
+        print(f"Resuming: {len(done_keys)} items already done.")
+
+    rows = []
+    with QUESTIONS_FILE.open(encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if line:
+                rows.append(json.loads(line))
+
+    RESULTS_FILE.parent.mkdir(parents=True, exist_ok=True)
+    MIN_FREE_RAM_PER_ITEM_GB = 2.0  # lower than the startup floor on purpose -- this is a running-
+    # low backoff during a long job, not a refusal to even start; the model's own ~9.5GB is already
+    # resident by this point and isn't part of what's draining further.
+    processed_this_run = 0
+    try:
+        with RESULTS_FILE.open("a", encoding="utf-8") as out:
+            for row in rows:
+                if args.limit is not None and processed_this_run >= args.limit:
+                    break
+                item_key = f"{row.get('source_file', '')}::{row.get('section_header', '')}::{row['question']}"
+                if item_key in done_keys:
+                    continue
+
+                free_gb = RG.available_gb()
+                backoff_tries = 0
+                while free_gb < MIN_FREE_RAM_PER_ITEM_GB and backoff_tries < 6:
+                    print(f"  [low RAM: {free_gb:.1f}GB free, below {MIN_FREE_RAM_PER_ITEM_GB}GB "
+                          f"floor -- pausing 10s before this item, try {backoff_tries + 1}/6]",
+                          flush=True)
+                    time.sleep(10)
+                    free_gb = RG.available_gb()
+                    backoff_tries += 1
+
+                # 2026-11-08: this call used to be unguarded -- ANY exception (a resource failure,
+                # a data edge case, anything) killed the whole process with no row written and no
+                # traceback captured (the exact failure mode that lost the 2026-11-08 215/223 run).
+                # Now: any exception is caught, logged as a real row with its full traceback, and
+                # the run continues to the next item instead of dying silently.
+                try:
+                    result = process_item(engine, row)
                 except Exception as exc:
-                    result = {"item_key": key, "question": item.get("question"),
-                               "train_status": "ERROR", "error": f"{type(exc).__name__}: {exc}"}
-                    counts["errors"] += 1
+                    result = {
+                        "item_key": item_key, "question": row.get("question"),
+                        "ground_truth_answer": row.get("ground_truth_answer"),
+                        "train_status": "exception",
+                        "exec_error": f"{type(exc).__name__}: {exc}",
+                        "exception_traceback": traceback.format_exc(),
+                        "free_ram_gb_at_failure": RG.available_gb(),
+                    }
+                    print(f"  [EXCEPTION on this item, logged and continuing: "
+                          f"{type(exc).__name__}: {exc}]", flush=True)
+
                 out.write(json.dumps(result, ensure_ascii=False) + "\n")
                 out.flush()
+                processed_this_run += 1
 
-                if result.get("own_weights_hit"):
-                    counts["own_weights"] += 1
-                if result.get("host_consulted"):
-                    counts["host_consulted"] += 1
-                c = result.get("confirmed")
-                if c is True:
-                    counts["confirmed_true"] += 1
-                elif c is False:
-                    counts["confirmed_false"] += 1
-                elif "confirmed" in result:
-                    counts["confirmed_none"] += 1
-                if result.get("blocked_stale_belief"):
-                    counts["blocked_stale_belief"] += 1
-                if result.get("flipped"):
-                    counts["flipped"] += 1
-                if result.get("train_status") == "line_too_short":
-                    counts["line_too_short"] += 1
-                counts["processed"] += 1
+                print(f"[{processed_this_run}/{len(rows) - len(done_keys)}] "
+                      f"({'host' if result.get('host_consulted') else 'own'}) "
+                      f"via={result.get('verification_method')} conf={result.get('confirmed')} "
+                      f"status={result.get('train_status')} :: {str(result.get('question'))[:80]!r}",
+                      flush=True)
 
-                src = result.get("host_answer_source", "own" if result.get("own_weights_hit") else "host")
-                print(f"[{i+1}/{len(items)}] ({src}) conf={c} sim={result.get('jaccard_sim')} "
-                      f"status={result.get('train_status')} :: {item.get('question','')[:80]}")
+                if processed_this_run % args.save_every == 0:
+                    _atomic_save(engine, SANDBOX_CHECKPOINT)
+                    print(f"  [checkpoint saved, {processed_this_run} processed so far]", flush=True)
 
-                if counts["processed"] % args.save_every == 0:
-                    LI.save(engine.cluster, engine.seen, engine.ingests)
-                    print(f"  [checkpoint saved, {counts['processed']} processed so far]")
-
-        LI.save(engine.cluster, engine.seen, engine.ingests)
+        _atomic_save(engine, SANDBOX_CHECKPOINT)
         print("=" * 70)
-        print(f"DONE. {json.dumps(counts)}")
-        print(f"n_bricks now: {len(engine.cluster.bricks)}")
-        print("=" * 70)
+        print(f"Done. {processed_this_run} new items processed this run; "
+              f"{len(done_keys) + processed_this_run} total done; "
+              f"{len(engine.cluster.vote_count)} bricks.")
     finally:
-        # Stop the host ourselves if we're the one who started it -- don't leave a ~9-10GB model
-        # resident on an unmanaged timer the way Ollama's keep_alive did (that's what starved the
-        # concurrently-running Stage A extractor of memory earlier tonight).
-        if started_proc is not None:
-            print(f"Stopping standalone host (pid {started_proc.pid}), started by this run...")
-            started_proc.terminate()
-            try:
-                started_proc.wait(timeout=15)
-            except Exception:
-                started_proc.kill()
+        RG.mark_stopped()
 
 
 if __name__ == "__main__":
