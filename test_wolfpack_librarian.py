@@ -12,27 +12,29 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).parent))
 
-import lutgtlm_ingest as LI
 import brick_cluster_charlm as BCC
-from wolfpack_librarian import WolfpackMainIndex
+from wolfpack_librarian import WolfpackMainIndex, stable_vec, freeze_reference_idf
 
-FRESH_STATE_PATH = Path(__file__).parent / "_wolfpack_test_fresh_state_never_saved.npz"
-if FRESH_STATE_PATH.exists():
-    FRESH_STATE_PATH.unlink()
-LI.STATE = str(FRESH_STATE_PATH)
-CLUSTER, _seen, _ingests = LI.load_or_init()
+tfidf_vec = stable_vec
 
 
-def tfidf_vec(text: str) -> np.ndarray:
-    idx, val = CLUSTER.tfidf_sparse(text)
-    dense = np.zeros(BCC.FEATURE_DIM, dtype=np.float64)
-    if len(idx):
-        dense[idx] = val
-    CLUSTER._update_doc_freq(text)  # test-harness responsibility, not the module's (see docstring)
-    return dense
+def _freeze_idf_from_full_corpus():
+    """Freeze the reference IDF from the WHOLE real corpus (6205 questions) -- a large,
+    representative sample, computed once, used forever after. Real deployment would freeze from
+    whatever large initial corpus/snapshot is available at setup time, same principle."""
+    path = Path(r"C:\Users\Azazel\Desktop\Amelia's Dataset\NLP Pilot\nlp_questions.jsonl")
+    texts = []
+    with path.open(encoding="utf-8") as f:
+        for line in f:
+            if line.strip():
+                row = json.loads(line)
+                texts.append(f"User: {row['question'].strip()}\nLucy: "
+                             f"{row['ground_truth_answer'].strip()}")
+    freeze_reference_idf(texts)
+    print(f"Froze reference IDF from {len(texts)} real questions (whole corpus).\n")
 
 
-def load_real_corpus(n_source_files=8, n_per_file=10):
+def load_real_corpus(n_source_files=27, n_per_file=30):
     path = Path(r"C:\Users\Azazel\Desktop\Amelia's Dataset\NLP Pilot\nlp_questions.jsonl")
     by_source = defaultdict(list)
     with path.open(encoding="utf-8") as f:
@@ -55,14 +57,24 @@ def load_real_corpus(n_source_files=8, n_per_file=10):
 
 
 def main():
-    all_facts, fact_to_source = load_real_corpus(n_source_files=8, n_per_file=10)
+    _freeze_idf_from_full_corpus()
+    all_facts, fact_to_source = load_real_corpus(n_source_files=27, n_per_file=30)
     print(f"Loaded {len(all_facts)} real facts from {len(set(fact_to_source.values()))} "
           f"real source files.\n")
 
+    # Realistic-scale, realistic-shape repetition: the LIVE pilot's own real data (checked
+    # directly, same session) shows a skewed reuse distribution -- 536 distinct bricks for 1918
+    # real items, most reused once or twice, but a real tail reused up to 126 times. Model that
+    # shape here (Zipf-like) instead of uniform random repeats, so REANCHOR_EVERY_N_MEMBERS
+    # actually gets meaningful chances to fire on the facts that matter, not just a token few.
     random.seed(1)
+    weights = [1.0 / (i + 1) for i in range(len(all_facts))]
+    order = list(range(len(all_facts)))
+    random.shuffle(order)
+    weighted_facts = [all_facts[i] for i in order]
     workload = list(all_facts)
-    for _ in range(min(200, len(all_facts) * 2)):
-        workload.append(random.choice(all_facts))
+    n_repeats = len(all_facts) * 8
+    workload.extend(random.choices(weighted_facts, weights=weights, k=n_repeats))
     random.shuffle(workload)
 
     main_idx = WolfpackMainIndex(dim=BCC.FEATURE_DIM, region_capacity=10)

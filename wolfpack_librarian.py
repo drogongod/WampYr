@@ -40,6 +40,57 @@ from typing import Optional
 
 import numpy as np
 
+from brick_cluster_charlm import raw_trigram_sparse, FEATURE_DIM
+
+_FROZEN_IDF = None  # set once via freeze_reference_idf(), never touched again
+
+
+def freeze_reference_idf(reference_texts) -> None:
+    """Compute doc-frequency/IDF ONCE from a large, representative reference sample and freeze it
+    forever. This is the real fix, found live 2026-11-10 after the first attempt (raw counts, no
+    IDF at all) made things WORSE (joiner retrieval 63.5% -> 36.7%): IDF isn't only a source of
+    instability, it's also doing real discriminative work -- downweighting generic filler
+    trigrams every sentence shares so genuine topical signal can stand out. Stripping it entirely
+    fixed stability but broke discrimination. The actual fix needs both: compute the downweighting
+    statistics from a large reference ONCE, then never again -- same chessboard principle, applied
+    correctly this time. A square's value gets painted once, from enough real data to mean
+    something, and is never repainted because something else was added later."""
+    global _FROZEN_IDF
+    doc_freq = np.zeros(FEATURE_DIM, dtype=np.float64)
+    n_docs = 0
+    for text in reference_texts:
+        counts = raw_trigram_sparse(text, FEATURE_DIM)
+        if counts:
+            idx = np.fromiter(counts.keys(), dtype=np.int64, count=len(counts))
+            doc_freq[idx] += 1.0
+        n_docs += 1
+    idf_smoothing = 1.0
+    _FROZEN_IDF = np.log((n_docs + idf_smoothing) / (doc_freq + idf_smoothing))
+
+
+def stable_vec(text: str) -> np.ndarray:
+    """The librarian's OWN feature vector -- deliberately NOT cluster.tfidf_sparse(), which
+    recomputes IDF from the CURRENTLY-growing corpus every call (measured: cosine(v_then, v_now)
+    = 0.855 for identical text after 200 unrelated documents were added in between -- a coordinate
+    grid that repaints every existing square whenever a new one is added). This multiplies the
+    same fixed, deterministic trigram hash (`raw_trigram_sparse`) by a FROZEN reference IDF table
+    (see freeze_reference_idf()) instead of a live-recomputed one -- same discriminative weighting,
+    zero dependence on anything added after the reference was frozen. Must call
+    freeze_reference_idf() once before using this, with a reasonably large, representative sample."""
+    if _FROZEN_IDF is None:
+        raise RuntimeError("stable_vec() needs freeze_reference_idf() called once first")
+    counts = raw_trigram_sparse(text, FEATURE_DIM)
+    dense = np.zeros(FEATURE_DIM, dtype=np.float64)
+    if counts:
+        idx = np.fromiter(counts.keys(), dtype=np.int64, count=len(counts))
+        cnt = np.fromiter(counts.values(), dtype=np.float64, count=len(counts))
+        val = cnt * _FROZEN_IDF[idx]
+        norm = np.linalg.norm(val)
+        if norm > 0:
+            val = val / norm
+        dense[idx] = val
+    return dense
+
 # Two forks resolved 2026-11-10, both implemented here:
 #   Fork 2 (top-level scan cost, confirmed O(n_regions) linear, ~7-8us/region at test scale):
 #     -> Option B, real LSH (random-hyperplane SimHash) bucketing instead of a full scan.
