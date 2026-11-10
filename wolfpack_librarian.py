@@ -180,6 +180,29 @@ class _LSHIndex:
         return out
 
 
+BRICK_FACT_CAPACITY = 5  # how many distinct facts ONE brick may hold before it's genuinely full.
+BRICK_SIMILARITY_THRESHOLD = 0.3  # tighter than the region-level 0.15 on purpose -- this is a
+# finer-grained "do these facts actually belong on the same brick" decision, not "same general
+# neighborhood." Without a floor here, a new fact would join whatever brick has room even with
+# near-zero real similarity, just because nothing better happened to be available yet -- the same
+# mistake (ignoring similarity in favor of an arbitrary rule) at a smaller scale. Provisional,
+# like every threshold tonight -- worth real calibration against actual quality outcomes later,
+# not asserted as tuned.
+# Found live 2026-11-10: the naive policy (one brick per distinct fact, spawn a new one every
+# time) gave zero overload (max reuse 2 vs the real system's 126) but at 3.6x the real system's
+# total brick count (1995 vs 556 for the same 1999 items) -- "unacceptable," rightly. A brick's
+# own fact list is small by nature (D=40 was never going to hold hundreds of genuinely distinct
+# things well), so checking whether an EXISTING brick still has room is cheap, not a real search --
+# there's no reason to mint a new brick while existing ones in the region aren't full yet.
+
+
+def _cos(a: np.ndarray, b: np.ndarray) -> float:
+    na, nb = np.linalg.norm(a), np.linalg.norm(b)
+    if na == 0 or nb == 0:
+        return 0.0
+    return float(np.dot(a, b) / (na * nb))
+
+
 @dataclass
 class Librarian:
     """Owns one bounded-capacity region. Her directory and anchor/medoid state are PRIVATE -- the
@@ -188,10 +211,8 @@ class Librarian:
     capacity: int
     _directory: dict = field(default_factory=dict)   # content_hash -> brick_id, PRIVATE
     _member_vecs: list = field(default_factory=list)  # PRIVATE, used only for medoid recompute
-    _bricks: list = field(default_factory=list)       # PRIVATE
-
-    def is_full(self) -> bool:
-        return len(self._bricks) >= self.capacity
+    _bricks: list = field(default_factory=list)       # PRIVATE, list of brick ids this region owns
+    _brick_vecs: dict = field(default_factory=dict)   # PRIVATE, brick_id -> list of its OWN member vecs
 
     def has_exact(self, text: str) -> Optional[int]:
         """Public, read-only: does this librarian already hold this exact content? Returns the
@@ -201,12 +222,36 @@ class Librarian:
         return self._directory.get(_content_hash(text))
 
     def assign_new(self, text: str, vec: np.ndarray, next_brick_id_fn) -> Optional[int]:
-        """Public: assign brand-new content to a brick within this region, if there's room.
-        Returns the new brick id, or None if full (caller must find/grow a sibling region)."""
-        if self.is_full():
+        """Public: assign brand-new content within this region. Found and fixed live 2026-11-10:
+        a "first brick with room" policy packs facts together by pure timing, not by whether they
+        actually belong together -- it could split two genuinely related facts across different
+        bricks in the same region for no reason except which filled up first. Instead: among
+        bricks with room, join whichever one's own existing members are the BEST actual match
+        (cheap -- each brick holds at most BRICK_FACT_CAPACITY facts, so this is a tiny scan, not
+        a real search). Only mint a new brick if no brick with room is a real match, or none have
+        room at all."""
+        best_brick, best_sim = None, -1.0
+        for brick_id in self._bricks:
+            members = self._brick_vecs[brick_id]
+            if len(members) >= BRICK_FACT_CAPACITY:
+                continue
+            if not members:
+                continue  # an empty brick has no members to compare against -- not a real match
+            sim = max(_cos(vec, m) for m in members)
+            if sim > best_sim:
+                best_sim, best_brick = sim, brick_id
+
+        if best_brick is not None and best_sim >= BRICK_SIMILARITY_THRESHOLD:
+            self._brick_vecs[best_brick].append(vec.copy())
+            self._directory[_content_hash(text)] = best_brick
+            self._member_vecs.append(vec.copy())
+            return best_brick
+
+        if len(self._bricks) >= self.capacity:
             return None
         brick_id = next_brick_id_fn()
         self._bricks.append(brick_id)
+        self._brick_vecs[brick_id] = [vec.copy()]
         self._directory[_content_hash(text)] = brick_id
         self._member_vecs.append(vec.copy())
         return brick_id
@@ -324,8 +369,14 @@ class WolfpackMainIndex:
         if scored and scored[0][0] >= self.region_similarity_threshold:
             best_sim, best_idx = scored[0]
             lib = self._librarians[best_idx]
-            if not lib.is_full():
-                brick_id = lib.assign_new(text, vec, self._next_brick_id)
+            # Call assign_new() directly and check its REAL return value -- do not gate on
+            # is_full() first. Found and fixed live 2026-11-10: is_full() answers "is every
+            # brick at fact-capacity," but assign_new() can fail for a DIFFERENT reason (no
+            # brick with room is similar enough, AND the region is at brick-count capacity).
+            # Those two conditions don't match; gating on the wrong one let a real None (no
+            # genuine assignment happened) get returned and silently miscounted as a brick id.
+            brick_id = lib.assign_new(text, vec, self._next_brick_id)
+            if brick_id is not None:
                 self._maybe_reanchor(best_idx)
                 return brick_id, False, lib.librarian_id
 
