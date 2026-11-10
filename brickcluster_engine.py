@@ -90,7 +90,7 @@ REFERENCE_URL = os.environ.get("VAMPIRE_REFERENCE_URL", "http://127.0.0.1:8102")
 # the call site below), so it can safely skip the donor ONLY for a verbatim retrieved answer --
 # the still-broken generate() path is untouched and still always falls through to the donor.
 LUCY_SKIP_DONOR_WHEN_MATCHED = True
-RETRIEVAL_COSINE_FLOOR = 0.5   # 2026-10-29, real calibration point from
+RETRIEVAL_COSINE_FLOOR = 0.8   # 2026-10-29, real calibration point from
 # retrieval_not_generation_test.py's Test 2 failure (NOT a tuned production threshold, a single
 # measured data point): a brick that has ONLY ever learned one fact (Ringo Starr's aunts) reported
 # margin=+inf -- and so "matched" -- for a COMPLETELY unrelated query ("capital of France"), because
@@ -106,6 +106,22 @@ RETRIEVAL_COSINE_FLOOR = 0.5   # 2026-10-29, real calibration point from
 # deeper cold-start margin bug (neg.n<2) is NOT fixed here -- out of scope for tonight, and
 # practically dormant once the real system has more than a couple of facts total (checkpoint
 # neg.n is already far past 2), but worth fixing for real before Public is ever cold-started.
+#
+# RAISED 0.5 -> 0.8 (2026-11-03, first real Stage B diary shakedown, lucy_diary_shakedown.py):
+# 0.5 was never validated against near-duplicate-but-factually-different phrasing, only against
+# the Ringo-Starr/France case above (genuinely unrelated topics). This diary's templated numeric
+# sections reuse one sentence frame for many different numbers ("What was the speed ratio of the
+# original base-5 production kernel [X] relative to [Y]?"), so three DIFFERENT real diary facts
+# measured real cosine 0.517-0.748 against each other under the actual production tfidf_sparse --
+# comfortably past 0.5, all three got "retrieved" as each other's answer. A tried fix (stripping
+# filler/stopwords before hashing, so matching is "blind" to generic connective words) was tested
+# and REJECTED: it moved similarity UP, not down (0.595->0.598, 0.517->0.560, 0.748->0.772),
+# because these facts collide on shared CONTENT words ("speed ratio", "production kernel"), not
+# filler -- stripping filler just concentrates the hash onto that same shared content. A real
+# same-fact paraphrase ("How many ms/window did ... measure for latency...") scored 0.857 against
+# its own original phrasing -- a real gap above the worst false-positive (0.748) -- so 0.8 sits in
+# that gap. This is based on ONE synthetic paraphrase example, not a validated set; revisit if a
+# real same-fact restatement from actual usage ever scores under 0.8 and gets wrongly rejected.
 MAX_HOST_TURNS = max(1, int(os.environ.get("VAMPIRE_HOST_TURNS", "1")))
 MAX_SESSION_TURNS = max(1, int(os.environ.get("VAMPIRE_SESSION_TURNS", "6")))
 LR_SCALE = float(os.environ.get("VAMPIRE_BRICK_LR_SCALE", "1.0"))
