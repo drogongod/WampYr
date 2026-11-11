@@ -256,6 +256,21 @@ class Librarian:
         self._member_vecs.append(vec.copy())
         return brick_id
 
+    def would_accept(self, vec: np.ndarray) -> bool:
+        """Public, read-only dry-run of assign_new()'s matching logic -- answers 'would this
+        region take this content right now' WITHOUT committing anything. Built for the idle
+        reshelve pass below: it needs to check candidate destinations before moving anything,
+        and must never mutate state while only exploring options. Mirrors assign_new()'s two
+        acceptance paths exactly (a similar-enough brick with room, or room for a fresh brick);
+        if either path there changes, this must change with it."""
+        for brick_id in self._bricks:
+            members = self._brick_vecs[brick_id]
+            if len(members) >= BRICK_FACT_CAPACITY or not members:
+                continue
+            if max(_cos(vec, m) for m in members) >= BRICK_SIMILARITY_THRESHOLD:
+                return True
+        return len(self._bricks) < self.capacity
+
     def member_count(self) -> int:
         return len(self._bricks)
 
@@ -387,3 +402,51 @@ class WolfpackMainIndex:
             "n_regions": len(self._librarians),
             "n_bricks": sum(lib.member_count() for lib in self._librarians),
         }
+
+
+@dataclass
+class ReshelveMove:
+    """One proposed move -- NOT yet executed. Actually migrating a fact's trained content
+    between bricks means forgetting it from the old one and re-teaching it into the new one,
+    which touches BrickCluster's real training mechanism and is a separate, larger decision.
+    This is the planning layer only: where something SHOULD go, not how to carry the move out."""
+    record_index: int
+    text: str
+    from_librarian_id: int
+    to_librarian_id: int
+    similarity_gain: float
+
+
+def idle_reshelve(main: WolfpackMainIndex, records: list) -> list:
+    """First edition (2026-11-10) of the idle-time reorganization pass (Jonathan: unlike a
+    frozen LLM that does nothing between prompts, Wolfpack's index is mutable, and the gap
+    between questions is real idle time this spends). Never called mid-dispatch -- the caller
+    must only invoke this between requests, same single-dispatch-point discipline as the rest
+    of this module; nothing here touches a live conversation.
+
+    `records`: list of (text, vec, current_librarian_id) for facts already placed by dispatch().
+    Wolfpack does not retain this history internally -- deciding what to reconsider is the
+    orchestrator's business, not the index's (same "each department is its own business"
+    principle the rest of this module follows). Returns a PLAN (list of ReshelveMove), capacity-
+    respecting (only proposes moves into a region that would genuinely accept the content right
+    now, via Librarian.would_accept() -- a plain "better anchor exists" check alone isn't enough,
+    since the earlier measurement that motivated this ignored capacity entirely).
+
+    Jonathan's framing, kept verbatim as the governing intent for why this stays decision-only
+    tonight: "this is the first edition of this... once perfected who knows what this will
+    evolve into." Scope is deliberately bounded to planning, not because execution is
+    impossible, but because real weight migration is a distinct, larger build.
+    """
+    moves = []
+    for idx, (text, vec, cur_lib_id) in enumerate(records):
+        cur_sim = main._cosine(vec, main._anchors[cur_lib_id])
+        best_idx, best_sim = None, cur_sim
+        for j, anchor in enumerate(main._anchors):
+            if j == cur_lib_id:
+                continue
+            s = main._cosine(vec, anchor)
+            if s > best_sim and main._librarians[j].would_accept(vec):
+                best_sim, best_idx = s, j
+        if best_idx is not None:
+            moves.append(ReshelveMove(idx, text, cur_lib_id, best_idx, best_sim - cur_sim))
+    return moves
