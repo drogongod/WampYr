@@ -821,6 +821,18 @@ class BrickCluster:
         # commonness of each bucket and should keep refining as more real data is seen, not freeze.
         self.doc_freq = np.zeros(FEATURE_DIM)
         self.n_docs = 0
+        # Optional frozen-reference IDF (2026-11-10, ported from wolfpack_librarian.py's
+        # freeze_reference_idf() -- see wolfpack_librarian_prototype_build_20261110.md /
+        # cross_system_bug_checklist.md item 20). Deliberately OPT-IN, NOT the default: the
+        # comment above argues IDF should keep refining, and that's a real, reasoned choice for
+        # most of what tfidf_sparse() is used for. The real risk this addresses is narrower and
+        # specific: if the SAME fact is taught to this cluster more than once (the repeated-
+        # exposure convergence mechanism this engine depends on), live IDF drift between those
+        # exposures can route the SAME text to a DIFFERENT brick the second time, undermining
+        # that exact mechanism. Call freeze_reference_idf() explicitly to opt in; until then,
+        # tfidf_sparse() behaves exactly as before, unchanged.
+        self._frozen_idf = None
+        self._idf_frozen = False
         self._gvar_cache = None   # see _global_var -- same cache-by-source-stat-change idea as
         self._gvar_cache_neg_n = -1   # _OnlineGaussian's, keyed on neg.n (changes IFF neg's own
         # stats change). Once neg freezes at NEG_FREEZE_AT_N, this returns the SAME array object
@@ -866,13 +878,18 @@ class BrickCluster:
     def tfidf_sparse(self, line):
         """The real hot-path feature computation -- returns (idx, val), NEVER materializes a
         dense FEATURE_DIM array (see raw_trigram_sparse's comment for why that matters at
-        FEATURE_DIM=8192). Same TF-IDF math as the now-legacy tfidf_features below, just sparse."""
+        FEATURE_DIM=8192). Same TF-IDF math as the now-legacy tfidf_features below, just sparse.
+        If freeze_reference_idf() has been called, uses the frozen table instead of live
+        self.n_docs/self.doc_freq -- see that method's docstring and __init__'s _idf_frozen
+        comment for why this is opt-in, not default."""
         counts = raw_trigram_sparse(line, FEATURE_DIM)
         if not counts:
             return np.empty(0, dtype=np.int64), np.empty(0, dtype=np.float64)
         idx = np.fromiter(counts.keys(), dtype=np.int64, count=len(counts))
         cnt = np.fromiter(counts.values(), dtype=np.float64, count=len(counts))
-        if self.n_docs < IDF_MIN_DOCS:
+        if self._idf_frozen:
+            val = cnt * self._frozen_idf[idx]
+        elif self.n_docs < IDF_MIN_DOCS:
             val = cnt
         else:
             df = self.doc_freq[idx]
@@ -882,6 +899,26 @@ class BrickCluster:
         if norm > 0:
             val = val / norm
         return idx, val
+
+    def freeze_reference_idf(self, reference_lines):
+        """OPT-IN (2026-11-10, ported from wolfpack_librarian.py -- see __init__'s _idf_frozen
+        comment for the real reason this matters: repeated-exposure routing consistency, not
+        just Wolfpack's own needs). Computes IDF ONCE from a large representative reference
+        sample and freezes it forever after -- tfidf_sparse() then uses this fixed table instead
+        of live self.n_docs/self.doc_freq, so identical text always produces an identical vector,
+        regardless of what else has been taught in between. Does NOT touch self.doc_freq/
+        self.n_docs themselves (left untouched for diagnostics/backward-compat); only sets the
+        separate frozen table tfidf_sparse() checks first."""
+        df = np.zeros(FEATURE_DIM)
+        n = 0
+        for line in reference_lines:
+            counts = raw_trigram_sparse(line, FEATURE_DIM)
+            if counts:
+                idx = np.fromiter(counts.keys(), dtype=np.int64, count=len(counts))
+                df[idx] += 1.0
+            n += 1
+        self._frozen_idf = np.log((n + IDF_SMOOTHING) / (df + IDF_SMOOTHING))
+        self._idf_frozen = True
 
     def tfidf_features(self, line):
         """Dense legacy accessor -- kept ONLY for existing diagnostics that expect a dense array
@@ -1387,7 +1424,10 @@ class BrickCluster:
                  "D_brick": np.array(self.D_brick), "seed": np.array(self.seed),
                  "neg_n": np.array(self.neg.n), "neg_sum": self.neg.sum, "neg_sumsq": self.neg.sumsq,
                  "doc_freq": self.doc_freq, "n_docs": np.array(self.n_docs),
-                 "global_step": np.array(self._global_step)}
+                 "global_step": np.array(self._global_step),
+                 "idf_frozen": np.array(self._idf_frozen),
+                 "frozen_idf": self._frozen_idf if self._frozen_idf is not None
+                               else np.zeros(FEATURE_DIM)}
         for i, (brick, pos) in enumerate(zip(self.bricks, self.brick_pos)):
             bstate = brick.export_state()
             for k, v in bstate.items():
@@ -1443,6 +1483,10 @@ class BrickCluster:
         cluster.neg.sumsq = state["neg_sumsq"]
         cluster.doc_freq = state["doc_freq"]
         cluster.n_docs = int(state["n_docs"])
+        # Backward-compatible default (False/None) for any checkpoint saved before
+        # freeze_reference_idf() existed -- same convention as global_step below.
+        cluster._idf_frozen = bool(state["idf_frozen"]) if "idf_frozen" in state_keys else False
+        cluster._frozen_idf = state["frozen_idf"] if cluster._idf_frozen else None
         # Backward-compatible default (0) for any checkpoint saved before the confirmation-gated
         # vote mechanism existed -- global_step starting at 0 on a pre-existing checkpoint just
         # means decay math treats every brick as "freshly confirmed," the same safe default as a
